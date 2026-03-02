@@ -1,0 +1,580 @@
+{
+    "nodes": [
+        {
+            "parameters": {
+                "rule": {
+                    "interval": [
+                        {
+                            "field": "minutes",
+                            "minutesInterval": 1
+                        }
+                    ]
+                }
+            },
+            "id": "auto-schedule-trigger",
+            "name": "Every 1 Min",
+            "type": "n8n-nodes-base.scheduleTrigger",
+            "position": [
+                600,
+                3360
+            ],
+            "typeVersion": 1.1
+        },
+        {
+            "parameters": {
+                "authentication": "nocoDbApiToken",
+                "operation": "getAll",
+                "projectId": "p5xxqp29w9h8sb6",
+                "table": "mgot1kl4sglenym",
+                "where": "(status,eq,Programado)",
+                "options": {}
+            },
+            "id": "9196488e-a74d-4791-b005-e0209c57f3a9",
+            "name": "Get Leads",
+            "type": "n8n-nodes-base.nocoDb",
+            "typeVersion": 3,
+            "position": [
+                820,
+                3360
+            ],
+            "credentials": {
+                "nocoDbApiToken": {
+                    "id": "tV5VwP4BVmME7Vgo",
+                    "name": "NocoDB Token account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "options": {
+                        "caseSensitive": true,
+                        "leftValue": "",
+                        "typeValidation": "strict",
+                        "version": 2
+                    },
+                    "conditions": [
+                        {
+                            "id": "is-due",
+                            "leftValue": "={{ $json.fecha_planificada }}",
+                            "operator": {
+                                "operation": "before",
+                                "type": "dateTime"
+                            },
+                            "rightValue": "={{ $now }}"
+                        }
+                    ],
+                    "combinator": "and"
+                },
+                "options": {}
+            },
+            "id": "due-filter",
+            "name": "Is Due Now?",
+            "type": "n8n-nodes-base.filter",
+            "typeVersion": 2.2,
+            "position": [
+                1020,
+                3360
+            ]
+        },
+        {
+            "parameters": {
+                "options": {}
+            },
+            "id": "0efeec15-29a5-4f0a-a7f5-7c23136b54fb",
+            "name": "Split In Batches",
+            "type": "n8n-nodes-base.splitInBatches",
+            "typeVersion": 3,
+            "position": [
+                1240,
+                3360
+            ]
+        },
+        {
+            "parameters": {
+                "method": "GET",
+                "url": "https://api.vapi.ai/call",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer 852080ba-ce7c-4778-b218-bf718613a2b6"
+                        }
+                    ]
+                },
+                "sendQuery": true,
+                "queryParameters": {
+                    "parameters": [
+                        {
+                            "name": "limit",
+                            "value": "100"
+                        }
+                    ]
+                },
+                "options": {}
+            },
+            "id": "check-active-calls",
+            "name": "Check Active Calls",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                1340,
+                3360
+            ],
+            "credentials": {
+                "httpHeaderAuth": {
+                    "id": "VyoKa0HV9ZpyrdVx",
+                    "name": "Header Auth account"
+                }
+            },
+            "onError": "continueErrorOutput"
+        },
+        {
+            "parameters": {
+                "assignments": {
+                    "assignments": [
+                        {
+                            "id": "count-active-id",
+                            "name": "activeCallCount",
+                            "type": "number",
+                            "value": "={{ (Array.isArray($json) ? $json : []).filter(c => ['queued', 'ringing', 'in-progress'].includes(c.status)).length }}"
+                        }
+                    ]
+                },
+                "options": {}
+            },
+            "id": "count-active-calls",
+            "name": "Count Active",
+            "type": "n8n-nodes-base.set",
+            "typeVersion": 3.4,
+            "position": [
+                1440,
+                3360
+            ]
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "options": {
+                        "caseSensitive": true,
+                        "leftValue": "",
+                        "typeValidation": "strict",
+                        "version": 2
+                    },
+                    "conditions": [
+                        {
+                            "id": "under-limit",
+                            "leftValue": "={{ $json.activeCallCount }}",
+                            "operator": {
+                                "operation": "lt",
+                                "type": "number"
+                            },
+                            "rightValue": 10
+                        }
+                    ],
+                    "combinator": "and"
+                },
+                "options": {}
+            },
+            "id": "under-limit-filter",
+            "name": "Under Limit?",
+            "type": "n8n-nodes-base.filter",
+            "typeVersion": 2.2,
+            "position": [
+                1540,
+                3360
+            ]
+        },
+        {
+            "parameters": {
+                "amount": 30
+            },
+            "id": "wait-for-slot",
+            "name": "Wait For Slot",
+            "type": "n8n-nodes-base.wait",
+            "typeVersion": 1.1,
+            "position": [
+                1540,
+                3560
+            ],
+            "webhookId": "wait-for-slot-webhook"
+        },
+        {
+            "parameters": {
+                "assignments": {
+                    "assignments": [
+                        {
+                            "id": "format-phone-id",
+                            "name": "formattedPhone",
+                            "type": "string",
+                            "value": "={{ (function() { let p = ($('Split In Batches').item.json.phone || '').toString().replace(/\\D/g, ''); return p ? (p.startsWith('34') ? '+' + p : '+34' + p) : ''; })() }}"
+                        }
+                    ]
+                },
+                "options": {}
+            },
+            "id": "f624ac08-0e01-4737-bbd9-bfcbe78b2b10",
+            "name": "Normalize Phone",
+            "type": "n8n-nodes-base.set",
+            "typeVersion": 3.4,
+            "position": [
+                1680,
+                3360
+            ]
+        },
+        {
+            "parameters": {
+                "mode": "raw",
+                "jsonOutput": "={\n  \"nombre\": \"{{ $('Split In Batches').item.json.name || 'cliente' }}\",\n  \"empresa\": \"{{ $('Split In Batches').item.json.name || 'su empresa' }}\",\n  \"address\": \"{{ $('Split In Batches').item.json.address || 'su localidad' }}\",\n  \"email\": \"{{ $('Split In Batches').item.json.email || '' }}\",\n  \"formattedPhone\": \"{{ $('Normalize Phone').item.json.formattedPhone }}\",\n  \"leadId\": \"{{ $('Split In Batches').item.json.unique_id }}\"\n}",
+                "options": {}
+            },
+            "id": "d8bfb46b-5cfb-4504-938c-3d262df05dd0",
+            "name": "Prepare Call Data",
+            "type": "n8n-nodes-base.set",
+            "typeVersion": 3.4,
+            "position": [
+                1900,
+                3360
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "https://api.vapi.ai/call",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer 852080ba-ce7c-4778-b218-bf718613a2b6"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={\n  \"customer\": { \"number\": \"{{ $json.formattedPhone }}\" },\n  \"assistantId\": \"49e56db1-1f20-4cf1-b031-9cea9fba73cb\",\n  \"phoneNumberId\": \"611c8c8e-ab43-4af0-8df0-f2f8fac8115b\",\n  \"assistantOverrides\": { \"variableValues\": { \"ciudad\": \"{{ $json.address }}\", \"nombre\": \"{{ $json.nombre }}\", \"tel_contacto\": \"{{ $json.formattedPhone }}\", \"correo_cliente\": \"{{ $json.email }}\", \"empresa\": \"{{ $json.empresa }}\" } }\n}",
+                "options": {}
+            },
+            "id": "7683c085-138b-430d-90ac-8c1a961ae1e0",
+            "name": "Call Vapi AI",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                2120,
+                3360
+            ],
+            "credentials": {
+                "httpHeaderAuth": {
+                    "id": "VyoKa0HV9ZpyrdVx",
+                    "name": "Header Auth account"
+                }
+            },
+            "onError": "continueErrorOutput"
+        },
+        {
+            "parameters": {
+                "assignments": {
+                    "assignments": [
+                        {
+                            "id": "log-id",
+                            "name": "vapi_call_id",
+                            "type": "string",
+                            "value": "={{ $json.id || '' }}"
+                        },
+                        {
+                            "id": "log-name",
+                            "name": "lead_name",
+                            "type": "string",
+                            "value": "={{ $('Prepare Call Data').item.json.empresa || 'Cliente' }}"
+                        },
+                        {
+                            "id": "log-phone",
+                            "name": "phone_called",
+                            "type": "string",
+                            "value": "={{ $('Prepare Call Data').item.json.formattedPhone }}"
+                        },
+                        {
+                            "id": "log-time",
+                            "name": "call_time",
+                            "type": "string",
+                            "value": "={{ $now }}"
+                        },
+                        {
+                            "id": "log-status",
+                            "name": "ended_reason",
+                            "type": "string",
+                            "value": "={{ $json.id ? 'Call Initiated' : 'Error - ' + ($json.message || $json.error || 'Unknown') }}"
+                        }
+                    ]
+                },
+                "options": {}
+            },
+            "id": "ed755e83-b034-4bb7-84f6-23e0282dfe6d",
+            "name": "Prepare Log",
+            "type": "n8n-nodes-base.set",
+            "typeVersion": 3.4,
+            "position": [
+                2400,
+                3360
+            ]
+        },
+        {
+            "parameters": {
+                "authentication": "nocoDbApiToken",
+                "operation": "create",
+                "projectId": "p5xxqp29w9h8sb6",
+                "table": "m013en5u2cyu30j",
+                "dataToSend": "autoMapInputData"
+            },
+            "id": "13584ee7-bc89-400c-bd75-13c3f7d2ecf5",
+            "name": "Insert Log",
+            "type": "n8n-nodes-base.nocoDb",
+            "typeVersion": 3,
+            "position": [
+                2620,
+                3360
+            ],
+            "credentials": {
+                "nocoDbApiToken": {
+                    "id": "tV5VwP4BVmME7Vgo",
+                    "name": "NocoDB Token account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "method": "PATCH",
+                "url": "https://nocodb.srv889387.hstgr.cloud/api/v2/tables/mgot1kl4sglenym/records",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "xc-token",
+                            "value": "jx3uoKeVaidZLF7M0skVb9pV6yvNsam0Hu-Vfeww"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "=[{\"unique_id\": \"{{ $('Prepare Call Data').item.json.leadId }}\", \"status\": \"Completado\", \"fecha_planificada\": null}]",
+                "options": {}
+            },
+            "id": "ec77c933-a439-4878-8afc-f70eb6ded679",
+            "name": "Update Lead Status",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                2840,
+                3360
+            ]
+        },
+        {
+            "parameters": {
+                "amount": 30
+            },
+            "id": "3b523551-cab4-4ab9-afa7-12e5c35ac5e8",
+            "name": "Wait 30s1",
+            "type": "n8n-nodes-base.wait",
+            "typeVersion": 1.1,
+            "position": [
+                3060,
+                3360
+            ],
+            "webhookId": "e006aade-1c7b-4691-8c49-71878091bc8d"
+        }
+    ],
+    "connections": {
+        "Every 1 Min": {
+            "main": [
+                [
+                    {
+                        "node": "Get Leads",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Get Leads": {
+            "main": [
+                [
+                    {
+                        "node": "Is Due Now?",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Is Due Now?": {
+            "main": [
+                [
+                    {
+                        "node": "Split In Batches",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Split In Batches": {
+            "main": [
+                [],
+                [
+                    {
+                        "node": "Check Active Calls",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Check Active Calls": {
+            "main": [
+                [
+                    {
+                        "node": "Count Active",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Count Active",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Count Active": {
+            "main": [
+                [
+                    {
+                        "node": "Under Limit?",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Under Limit?": {
+            "main": [
+                [
+                    {
+                        "node": "Normalize Phone",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Wait For Slot",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Wait For Slot": {
+            "main": [
+                [
+                    {
+                        "node": "Check Active Calls",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Normalize Phone": {
+            "main": [
+                [
+                    {
+                        "node": "Prepare Call Data",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Prepare Call Data": {
+            "main": [
+                [
+                    {
+                        "node": "Call Vapi AI",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Call Vapi AI": {
+            "main": [
+                [
+                    {
+                        "node": "Prepare Log",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Prepare Log",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Prepare Log": {
+            "main": [
+                [
+                    {
+                        "node": "Insert Log",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Insert Log": {
+            "main": [
+                [
+                    {
+                        "node": "Update Lead Status",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Update Lead Status": {
+            "main": [
+                [
+                    {
+                        "node": "Wait 30s1",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Wait 30s1": {
+            "main": [
+                [
+                    {
+                        "node": "Split In Batches",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    }
+}

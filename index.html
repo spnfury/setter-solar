@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>Dashboard de Llamadas - GeneralProtect</title>
+    <link rel="icon" type="image/png" href="./favicon.png">
+    <link rel="stylesheet" href="./style.css">
+    <!-- Extra Dependencies -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/themes/dark.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr/dist/l10n/es.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+</head>
+
+<body class="auth-hidden">
+    <!-- Login Gate -->
+    <div id="login-gate" class="login-overlay">
+        <div class="login-card">
+            <img src="./logo.png" alt="SkyPulse" class="brand-logo">
+            <h2>Acceso al Dashboard</h2>
+            <p>Introduce la contraseña para continuar</p>
+            <form id="login-form">
+                <input type="password" id="password-input" placeholder="Contraseña" required>
+                <button type="submit" class="refresh-btn" style="width: 100%;">Entrar</button>
+            </form>
+            <p id="auth-error" class="auth-error" style="display: none;">Contraseña incorrecta</p>
+        </div>
+    </div>
+
+    <!-- Main Dashboard -->
+    <div class="container" id="main-content">
+        <header>
+            <h1>
+                <img src="./logo.png" alt="SkyPulse" class="header-logo">
+                SkyPulse Dashboard <small
+                    style="font-size: 12px; color: var(--text-secondary); margin-left: 8px; font-weight: 400;">v0.0.6</small>
+            </h1>
+            <div class="header-actions">
+                <div class="automation-control">
+                    <span style="font-size: 13px; font-weight: 600;">🤖 Automatización</span>
+                    <label class="switch">
+                        <input type="checkbox" id="automation-toggle" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <button class="refresh-btn" id="refresh-btn">🔄 Actualizar</button>
+            </div>
+        </header>
+
+        <nav class="nav-tabs">
+            <div class="nav-tab active" data-tab="dashboard">📊 Dashboard</div>
+            <div class="nav-tab" data-tab="leads">👥 Gestión de Leads</div>
+            <div class="nav-tab" data-tab="scheduler">📅 Programar Llamadas</div>
+            <div class="nav-tab" data-tab="realtime" id="nav-tab-realtime">🔴 En Vivo <span id="realtime-badge"
+                    class="realtime-badge" style="display:none;">0</span></div>
+            <div class="nav-tab" data-tab="reports">📈 Informes</div>
+            <div class="nav-tab" data-tab="test">🧪 Test</div>
+            <div class="nav-tab" data-tab="agents">🤖 Agentes</div>
+            <div class="nav-tab" data-tab="changelog">📝 Changelog</div>
+        </nav>
+
+        <!-- Tab 1: Dashboard View -->
+        <div id="view-dashboard" class="view-content active">
+
+            <!-- Integrated Filter Bar -->
+            <div class="dashboard-filter-bar">
+                <div class="filter-bar-search">
+                    <span class="filter-bar-icon">🔍</span>
+                    <input type="text" id="filter-company" placeholder="Buscar por empresa...">
+                </div>
+                <div class="filter-bar-controls">
+                    <div class="filter-pill">
+                        <span class="filter-pill-icon">🚦</span>
+                        <select id="filter-status" class="filter-pill-select">
+                            <option value="all">Todos</option>
+                            <option value="success">Éxito</option>
+                            <option value="fail">Fallidas</option>
+                        </select>
+                    </div>
+                    <div class="filter-pill">
+                        <span class="filter-pill-icon">🏆</span>
+                        <select id="filter-score" class="filter-pill-select">
+                            <option value="all">Score</option>
+                            <option value="80-100">🟢 80-100</option>
+                            <option value="60-79">🔵 60-79</option>
+                            <option value="40-59">🟡 40-59</option>
+                            <option value="20-39">🟠 20-39</option>
+                            <option value="0-19">🔴 0-19</option>
+                        </select>
+                    </div>
+                    <div class="filter-pill date-pill">
+                        <span class="filter-pill-icon">📅</span>
+                        <input type="text" id="date-range" placeholder="Fechas...">
+                    </div>
+                    <label class="filter-pill filter-pill-toggle" for="filter-confirmed">
+                        <input type="checkbox" id="filter-confirmed">
+                        <span class="filter-pill-check">✅ Confirmados</span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="analytics-section">
+                <div class="section-title">📊 Análisis de Rendimiento</div>
+                <div class="chart-container glass-effect">
+                    <canvas id="callsChart"></canvas>
+                </div>
+            </div>
+
+            <div class="planned-section" id="planned-section" style="display: none;">
+                <div class="section-title">📅 Planificación de Llamadas</div>
+                <div class="planned-grid" id="planned-grid">
+                    <!-- Upcoming leads will be injected here -->
+                </div>
+            </div>
+
+            <div class="stats-grid" id="stats">
+                <div class="stat-card">
+                    <div class="stat-value" id="total-calls"><span class="skeleton-value"></span></div>
+                    <div class="stat-label">Total Llamadas</div>
+                </div>
+                <div class="stat-card warning">
+                    <div class="stat-value" id="confirmed-count"><span class="skeleton-value"></span></div>
+                    <div class="stat-label">Confirmados</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-value" id="confirmation-rate"><span class="skeleton-value"></span></div>
+                    <div class="stat-label">% Confirmados</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-value" id="success-rate"><span class="skeleton-value"></span></div>
+                    <div class="stat-label">Tasa de Éxito</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="avg-duration"><span class="skeleton-value"></span></div>
+                    <div class="stat-label">Duración Media</div>
+                </div>
+                <div class="stat-card score">
+                    <div class="stat-value" id="avg-score"><span class="skeleton-value"></span></div>
+                    <div class="stat-label" id="avg-score-label">Score Medio</div>
+                </div>
+            </div>
+
+            <div class="section-title">📋 Historial de Llamadas</div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Detalle</th>
+                            <th>Vapi Call ID</th>
+                            <th>Empresa</th>
+                            <th>Teléfono</th>
+                            <th>Fecha</th>
+                            <th>Resultado</th>
+                            <th>Evaluación</th>
+                            <th>Duración</th>
+                            <th>Score</th>
+                            <th>Notas</th>
+                            <th>Confirmado</th>
+                        </tr>
+                    </thead>
+                    <tbody id="call-table">
+                        <tr>
+                            <td colspan="12" class="loading">Cargando datos...</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div id="call-pagination"></div>
+            </div>
+        </div>
+
+        <!-- Tab 2: Lead Management View -->
+        <div id="view-leads" class="view-content">
+            <div class="leads-header">
+                <div class="leads-search-container">
+                    <input type="text" id="lead-search" class="leads-search-input"
+                        placeholder="Buscar leads por nombre, email o teléfono...">
+                </div>
+                <div class="leads-actions">
+                    <input type="file" id="csv-import" accept=".csv" style="display: none;">
+                    <button class="btn-bulk-import" id="btn-import-csv">📂 Importar CSV</button>
+                    <button class="btn-add-lead" id="btn-add-lead">✨ Nuevo Lead</button>
+                </div>
+            </div>
+
+            <!-- KPI Header -->
+            <div class="leads-kpi-section">
+                <div class="leads-kpi-card leads-kpi-total">
+                    <div class="leads-kpi-icon">👥</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="kpi-total-leads"><span class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">Total Leads</div>
+                    </div>
+                </div>
+                <div class="leads-kpi-card leads-kpi-nuevos">
+                    <div class="leads-kpi-icon">🆕</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="kpi-nuevos"><span class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">Nuevos</div>
+                    </div>
+                    <div class="leads-kpi-bar">
+                        <div class="leads-kpi-bar-fill nuevos" id="kpi-bar-nuevos"></div>
+                    </div>
+                </div>
+                <div class="leads-kpi-card leads-kpi-programados">
+                    <div class="leads-kpi-icon">📅</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="kpi-programados"><span class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">Programados</div>
+                    </div>
+                    <div class="leads-kpi-bar">
+                        <div class="leads-kpi-bar-fill programados" id="kpi-bar-programados"></div>
+                    </div>
+                </div>
+                <div class="leads-kpi-card leads-kpi-completados">
+                    <div class="leads-kpi-icon">✅</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="kpi-completados"><span class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">Completados</div>
+                    </div>
+                    <div class="leads-kpi-bar">
+                        <div class="leads-kpi-bar-fill completados" id="kpi-bar-completados"></div>
+                    </div>
+                </div>
+                <div class="leads-kpi-card leads-kpi-interesados">
+                    <div class="leads-kpi-icon">🔥</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="kpi-interesados"><span class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">Interesados</div>
+                    </div>
+                    <div class="leads-kpi-bar">
+                        <div class="leads-kpi-bar-fill interesados" id="kpi-bar-interesados"></div>
+                    </div>
+                </div>
+                <div class="leads-kpi-card leads-kpi-fallidos">
+                    <div class="leads-kpi-icon">❌</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="kpi-fallidos"><span class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">Fallidos</div>
+                    </div>
+                    <div class="leads-kpi-bar">
+                        <div class="leads-kpi-bar-fill fallidos" id="kpi-bar-fallidos"></div>
+                    </div>
+                </div>
+                <div class="leads-kpi-card leads-kpi-conversion">
+                    <div class="leads-kpi-icon">📈</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="kpi-conversion"><span class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">Tasa Conversión</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Acciones</th>
+                            <th>Empresa</th>
+                            <th>Sector</th>
+                            <th>Teléfono</th>
+                            <th>Email</th>
+                            <th>Estado</th>
+                            <th>Próxima Llamada</th>
+                        </tr>
+                    </thead>
+                    <tbody id="leads-master-table">
+                        <tr>
+                            <td colspan="7" class="loading">Cargando lista de leads...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Tab 3: Bulk Scheduler View -->
+        <div id="view-scheduler" class="view-content">
+            <div class="scheduler-container">
+
+                <!-- Scheduler KPI Header -->
+                <div class="sched-kpi-header">
+                    <div class="sched-kpi-card sched-kpi-total">
+                        <div class="sched-kpi-icon">📞</div>
+                        <div class="sched-kpi-info">
+                            <div class="sched-kpi-value" id="sched-kpi-total"><span class="skeleton-value sm"></span>
+                            </div>
+                            <div class="sched-kpi-label">Total Leads en BD</div>
+                        </div>
+                    </div>
+                    <div class="sched-kpi-card sched-kpi-eligible">
+                        <div class="sched-kpi-icon">✅</div>
+                        <div class="sched-kpi-info">
+                            <div class="sched-kpi-value" id="sched-kpi-eligible"><span class="skeleton-value sm"></span>
+                            </div>
+                            <div class="sched-kpi-label">Elegibles</div>
+                        </div>
+                        <div class="sched-kpi-bar">
+                            <div class="sched-kpi-bar-fill eligible" id="sched-kpi-bar-eligible"></div>
+                        </div>
+                    </div>
+                    <div class="sched-kpi-card sched-kpi-scheduled">
+                        <div class="sched-kpi-icon">📅</div>
+                        <div class="sched-kpi-info">
+                            <div class="sched-kpi-value" id="sched-kpi-scheduled"><span
+                                    class="skeleton-value sm"></span></div>
+                            <div class="sched-kpi-label">Ya Programados</div>
+                        </div>
+                        <div class="sched-kpi-bar">
+                            <div class="sched-kpi-bar-fill scheduled" id="sched-kpi-bar-scheduled"></div>
+                        </div>
+                    </div>
+                    <div class="sched-kpi-card sched-kpi-called">
+                        <div class="sched-kpi-icon">✔️</div>
+                        <div class="sched-kpi-info">
+                            <div class="sched-kpi-value" id="sched-kpi-called"><span class="skeleton-value sm"></span>
+                            </div>
+                            <div class="sched-kpi-label">Ya Llamados</div>
+                        </div>
+                        <div class="sched-kpi-bar">
+                            <div class="sched-kpi-bar-fill called" id="sched-kpi-bar-called"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="scheduler-config glass-effect">
+                    <div class="section-title" style="margin-bottom: 24px;">⚙️ Configuración de Programación</div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+
+                        <!-- Left Column: Slider + Options -->
+                        <div class="sched-config-card">
+                            <label class="sched-config-label">📊 Cantidad de Leads a Programar</label>
+                            <div class="sched-slider-container">
+                                <div class="sched-slider-value-bubble" id="sched-slider-bubble">50</div>
+                                <input type="range" id="sched-count" min="1" max="500" value="50" class="sched-slider">
+                                <div class="sched-slider-labels">
+                                    <span>1</span>
+                                    <span>100</span>
+                                    <span>250</span>
+                                    <span>500</span>
+                                </div>
+                            </div>
+                            <div class="sched-source-row">
+                                <select id="sched-source" class="sched-select">
+                                    <option value="newest">📥 Más recientes primero</option>
+                                    <option value="oldest">📤 Más antiguos primero</option>
+                                </select>
+                            </div>
+                            <div class="sched-skip-option">
+                                <input type="checkbox" id="sched-skip-called" checked>
+                                <label for="sched-skip-called">
+                                    🚫 Saltar leads ya llamados
+                                </label>
+                                <span class="sched-skip-hint">Excluye: Completado, Contestador, No contesta,
+                                    Fallido</span>
+                            </div>
+                            <p class="sched-hint">Solo se programarán leads con teléfono válido y sin llamada pendiente
+                            </p>
+                        </div>
+
+                        <!-- Right Column: Time & Assistant -->
+                        <div class="sched-config-card">
+                            <div class="form-group">
+                                <label for="sched-start" class="sched-config-label">🕐 Fecha y Hora de Inicio</label>
+                                <input type="datetime-local" id="sched-start" class="sched-input">
+                                <p class="sched-hint">Primera llamada se ejecutará a esta hora</p>
+                            </div>
+                            <div class="form-group">
+                                <label for="sched-spacing" class="sched-config-label">⏱️ Espacio entre llamadas</label>
+                                <div class="sched-spacing-row">
+                                    <input type="number" id="sched-spacing" value="2" min="1" max="60"
+                                        class="sched-input sched-input-small">
+                                    <span class="sched-spacing-unit">minutos</span>
+                                    <div class="sched-duration-estimate" id="sched-duration-estimate">≈ 1h 40m total
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="sched-assistant" class="sched-config-label">🤖 Asistente IA</label>
+                                <select id="sched-assistant" class="sched-select">
+                                    <option value="49e56db1-1f20-4cf1-b031-9cea9fba73cb">V1 — Violeta (original)
+                                    </option>
+                                    <option value="f34469b5-334e-4fbf-b5ad-b2b05e8d76ee">V2 — Marcos (amable)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="sched-action-bar">
+                        <button id="sched-preview-btn" class="sched-btn sched-btn-preview">🔍 Ver Preview</button>
+                        <button id="sched-execute-btn" class="sched-btn sched-btn-execute" disabled>🚀 Programar
+                            Llamadas</button>
+                    </div>
+                </div>
+
+                <!-- Schedule Summary -->
+                <div id="sched-summary" class="scheduler-summary glass-effect" style="display: none;">
+                    <div
+                        style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                        <div class="section-title" style="margin: 0;">📋 Resumen de Programación</div>
+                        <div id="sched-summary-stats" style="display: flex; gap: 16px;"></div>
+                    </div>
+                    <div id="sched-timeline" style="max-height: 400px; overflow-y: auto; padding-right: 8px;"></div>
+                </div>
+
+                <!-- Progress Bar -->
+                <div id="sched-progress" class="scheduler-progress glass-effect" style="display: none;">
+                    <div class="section-title" style="margin-bottom: 12px;">⏳ Progreso</div>
+                    <div class="progress-bar-container">
+                        <div id="sched-progress-bar" class="progress-bar-fill"></div>
+                    </div>
+                    <div id="sched-progress-text"
+                        style="text-align: center; margin-top: 8px; font-size: 13px; color: var(--text-secondary);">0 /
+                        0</div>
+                    <div id="sched-progress-log"
+                        style="max-height: 200px; overflow-y: auto; margin-top: 12px; font-family: monospace; font-size: 12px; color: var(--text-secondary);">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab 5: Realtime Monitor View -->
+        <div id="view-realtime" class="view-content">
+            <div class="realtime-header">
+                <div class="realtime-header-info">
+                    <h2 style="margin: 0; font-size: 20px; display: flex; align-items: center; gap: 10px;">
+                        <span class="live-pulse-dot"></span> Monitor en Tiempo Real
+                    </h2>
+                    <p style="color: var(--text-secondary); font-size: 13px; margin-top: 4px;">Visualiza las llamadas
+                        activas y su transcripción en vivo.</p>
+                </div>
+                <div class="realtime-controls">
+                    <div class="realtime-status-pill" id="realtime-status">
+                        <span class="live-pulse-dot small"></span>
+                        <span id="realtime-status-text">Escaneando...</span>
+                    </div>
+                    <button class="refresh-btn" id="realtime-refresh-btn" style="padding: 8px 16px;">🔄 Forzar
+                        Scan</button>
+                </div>
+            </div>
+
+            <!-- Active Calls Counter -->
+            <div class="realtime-stats" id="realtime-stats">
+                <div class="realtime-stat-card">
+                    <div class="realtime-stat-value" id="rt-active-count"><span class="skeleton-value sm"></span></div>
+                    <div class="realtime-stat-label">Llamadas Activas</div>
+                </div>
+                <div class="realtime-stat-card">
+                    <div class="realtime-stat-value" id="rt-queued-count"><span class="skeleton-value sm"></span></div>
+                    <div class="realtime-stat-label">En Cola</div>
+                </div>
+                <div class="realtime-stat-card">
+                    <div class="realtime-stat-value" id="rt-ringing-count"><span class="skeleton-value sm"></span></div>
+                    <div class="realtime-stat-label">Sonando</div>
+                </div>
+                <div class="realtime-stat-card">
+                    <div class="realtime-stat-value" id="rt-total-today"><span class="skeleton-value sm"></span></div>
+                    <div class="realtime-stat-label">Total Hoy</div>
+                </div>
+            </div>
+
+            <!-- Active Calls Grid -->
+            <div id="realtime-calls-grid" class="realtime-calls-grid">
+                <div class="realtime-empty-state">
+                    <div class="realtime-empty-icon">📡</div>
+                    <h3>Escaneando llamadas activas...</h3>
+                    <p>El sistema busca llamadas en curso automáticamente cada 5 segundos.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab: Reports / Informes diarios -->
+        <div id="view-reports" class="view-content">
+            <div class="reports-header">
+                <div class="reports-header-info">
+                    <h2 style="margin: 0; font-size: 20px; display: flex; align-items: center; gap: 10px;">📈 Informes
+                        Diarios</h2>
+                    <p style="color: var(--text-secondary); font-size: 13px; margin-top: 4px;">Análisis automático de
+                        rendimiento generado por IA cada día.</p>
+                </div>
+                <div class="reports-controls">
+                    <button class="refresh-btn" id="reports-refresh-btn">🔄 Actualizar</button>
+                    <button class="refresh-btn" id="reports-run-btn"
+                        style="background: var(--accent); border-color: var(--accent);">🤖 Ejecutar Análisis
+                        Hoy</button>
+                </div>
+            </div>
+            <div id="reports-timeline" class="reports-timeline">
+                <div class="loading" style="text-align: center; padding: 60px; color: var(--text-secondary);">Cargando
+                    informes...</div>
+            </div>
+        </div>
+
+        <!-- Tab 6: Test Calls View -->
+        <div id="view-test" class="view-content">
+            <div class="test-header">
+                <div class="test-header-info">
+                    <h2 style="margin: 0; font-size: 20px;">🧪 Llamadas de Test / Manuales</h2>
+                    <p style="color: var(--text-secondary); font-size: 13px; margin-top: 4px;">Estas llamadas fueron
+                        realizadas manualmente y no forman parte de las campañas programadas.</p>
+                </div>
+                <div class="test-stats" id="test-stats">
+                    <div class="test-stat-pill">
+                        <span class="test-stat-value" id="test-total"><span class="skeleton-value xs"></span></span>
+                        <span class="test-stat-label">Total</span>
+                    </div>
+                    <div class="test-stat-pill success">
+                        <span class="test-stat-value" id="test-success"><span class="skeleton-value xs"></span></span>
+                        <span class="test-stat-label">Exitosas</span>
+                    </div>
+                    <div class="test-stat-pill danger">
+                        <span class="test-stat-value" id="test-failed"><span class="skeleton-value xs"></span></span>
+                        <span class="test-stat-label">Fallidas</span>
+                    </div>
+                    <div class="test-stat-pill warning">
+                        <span class="test-stat-value" id="test-voicemail"><span class="skeleton-value xs"></span></span>
+                        <span class="test-stat-label">Contestador</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Detalle</th>
+                            <th>Vapi Call ID</th>
+                            <th>Empresa</th>
+                            <th>Teléfono</th>
+                            <th>Fecha</th>
+                            <th>Resultado</th>
+                            <th>Evaluación</th>
+                            <th>Duración</th>
+                            <th>Score</th>
+                            <th>Confirmado</th>
+                        </tr>
+                    </thead>
+                    <tbody id="test-call-table">
+                        <tr>
+                            <td colspan="10" class="loading">Cargando llamadas de test...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Tab 7: Agent Prompt Editor -->
+        <div id="view-agents" class="view-content">
+            <div class="agents-header">
+                <div class="agents-header-info">
+                    <h2 style="margin: 0; font-size: 20px; display: flex; align-items: center; gap: 10px;">🤖 Editor de
+                        Prompts de Agentes</h2>
+                    <p style="color: var(--text-secondary); font-size: 13px; margin-top: 4px;">Selecciona un asistente
+                        para ver y editar su prompt del sistema. Los cambios se aplican inmediatamente en producción.
+                    </p>
+                </div>
+            </div>
+
+            <div class="agents-container">
+                <!-- Agent Selector -->
+                <div class="agents-selector-row">
+                    <div class="form-group" style="flex: 1;">
+                        <label for="agent-select" class="sched-config-label">🤖 Seleccionar Asistente</label>
+                        <select id="agent-select" class="sched-select">
+                            <option value="49e56db1-1f20-4cf1-b031-9cea9fba73cb">V1 — Violeta (original)</option>
+                            <option value="f34469b5-334e-4fbf-b5ad-b2b05e8d76ee">V2 — Marcos (amable)</option>
+                        </select>
+                    </div>
+                    <button id="agent-load-btn" class="refresh-btn" style="align-self: flex-end; margin-bottom: 2px;">📥
+                        Cargar Prompt</button>
+                </div>
+
+                <!-- Agent Info Bar -->
+                <div class="prompt-info-bar" id="prompt-info-bar" style="display: none;">
+                    <div class="prompt-info-item">
+                        <span class="prompt-info-icon">🏷️</span>
+                        <span class="prompt-info-label">Nombre:</span>
+                        <span class="prompt-info-value" id="agent-info-name">—</span>
+                    </div>
+                    <div class="prompt-info-item">
+                        <span class="prompt-info-icon">🧠</span>
+                        <span class="prompt-info-label">Modelo:</span>
+                        <span class="prompt-info-value" id="agent-info-model">—</span>
+                    </div>
+                    <div class="prompt-info-item">
+                        <span class="prompt-info-icon">📏</span>
+                        <span class="prompt-info-label">Caracteres:</span>
+                        <span class="prompt-info-value" id="agent-info-chars">—</span>
+                    </div>
+                </div>
+
+                <!-- Prompt Editor -->
+                <div class="prompt-editor-wrapper" id="prompt-editor-wrapper" style="display: none;">
+                    <textarea id="agent-prompt-textarea" class="prompt-editor-area"
+                        placeholder="El prompt del agente aparecerá aquí al cargarlo..."></textarea>
+                </div>
+
+                <!-- Action Bar -->
+                <div class="prompt-actions" id="prompt-actions" style="display: none;">
+                    <div class="prompt-actions-left">
+                        <span id="prompt-char-count" class="prompt-char-count">0 caracteres</span>
+                    </div>
+                    <div class="prompt-actions-right">
+                        <button id="agent-save-btn" class="sched-btn sched-btn-execute">💾 Guardar Prompt</button>
+                    </div>
+                </div>
+
+                <!-- Feedback -->
+                <div id="agent-feedback"
+                    style="text-align: center; font-weight: 500; min-height: 24px; margin-top: 12px;"></div>
+            </div>
+        </div>
+
+        <!-- Tab 8: Changelog View -->
+        <div id="view-changelog" class="view-content">
+            <div class="changelog-header">
+                <div class="changelog-header-info">
+                    <h2 style="margin: 0; font-size: 20px; display: flex; align-items: center; gap: 10px;">📝 Registro
+                        de Cambios</h2>
+                    <p style="color: var(--text-secondary); font-size: 13px; margin-top: 4px;">Historial día a día de
+                        todas las mejoras, correcciones y nuevas funcionalidades implementadas en la plataforma.</p>
+                </div>
+            </div>
+            <div id="changelog-timeline" class="changelog-timeline">
+                <div class="loading" style="text-align: center; padding: 60px; color: var(--text-secondary);">Cargando
+                    changelog...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal para Detalle -->
+    <div class="modal" id="detail-modal">
+        <div class="modal-content">
+            <button class="close-modal" id="close-modal">×</button>
+            <div class="modal-header">
+                <h2 id="modal-title">Detalle de la Llamada</h2>
+                <p id="modal-subtitle" style="color: var(--text-secondary); font-size: 14px; margin-top: 4px;"></p>
+                <div id="modal-test-toggle"
+                    style="margin-top: 12px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                    <button id="toggle-test-btn" class="toggle-test-pill" onclick="window._toggleDetailTest()">
+                        <span class="toggle-test-icon">🧪</span>
+                        <span class="toggle-test-label">Marcar como Test</span>
+                    </button>
+                    <button id="retry-call-btn" class="toggle-test-pill" onclick="window._retryCall()"
+                        style="background: rgba(34, 197, 94, 0.15); border-color: rgba(34, 197, 94, 0.3);">
+                        <span class="toggle-test-icon">🔄</span>
+                        <span class="toggle-test-label">Rellamar con contexto</span>
+                    </button>
+                    <button id="diagnostic-btn" class="toggle-test-pill" onclick="window._runDiagnostic()"
+                        style="background: rgba(168, 85, 247, 0.15); border-color: rgba(168, 85, 247, 0.3);">
+                        <span class="toggle-test-icon">🔍</span>
+                        <span class="toggle-test-label">Diagnóstico IA</span>
+                    </button>
+                </div>
+                <div id="retry-feedback" style="margin-top: 8px; font-size: 12px; display: none;"></div>
+            </div>
+
+            <div id="score-section" style="display: none; margin-bottom: 24px;"></div>
+
+            <div id="diagnostic-section" style="display: none; margin-bottom: 24px;"></div>
+
+            <!-- Datos Originales del Lead (siempre visible) -->
+            <div id="original-lead-section"
+                style="background: rgba(99, 102, 241, 0.08); padding: 16px; border-radius: 12px; border: 1px solid rgba(99, 102, 241, 0.25); margin-bottom: 24px;">
+                <div class="section-title" style="margin-bottom: 10px; font-size: 14px; color: var(--accent);">📋 Datos
+                    Originales del Lead</div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; font-size: 14px;">
+                    <p style="margin: 0;"><strong
+                            style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;">Empresa</strong><br><span
+                            id="orig-name" style="color: var(--text-primary);">—</span></p>
+                    <p style="margin: 0;"><strong
+                            style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;">Teléfono</strong><br><span
+                            id="orig-phone" style="color: var(--text-primary);">—</span></p>
+                    <p style="margin: 0;"><strong
+                            style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;">Email</strong><br><span
+                            id="orig-email" style="color: var(--text-primary);">—</span></p>
+                    <p style="margin: 0;"><strong
+                            style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;">Sector</strong><br><span
+                            id="orig-sector" style="color: var(--text-primary);">—</span></p>
+                </div>
+            </div>
+
+            <div class="section-title">📝 Transcripción</div>
+            <div class="transcript-text" id="modal-transcript">No hay transcripción disponible para esta llamada.</div>
+            <div id="extraction-tools" style="margin: 15px 0; display: none;">
+                <button id="extract-transcript-btn" class="refresh-btn"
+                    style="background: var(--accent); width: 100%;">✨ Extraer Info de Contacto</button>
+            </div>
+
+            <div id="extraction-results"
+                style="display: none; background: rgba(99, 102, 241, 0.1); padding: 16px; border-radius: 12px; border: 1px solid var(--accent); margin-bottom: 24px;">
+                <div class="section-title" style="margin-bottom: 12px; font-size: 14px; color: var(--accent);">📋
+                    Información Detectada</div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                    <div class="form-group">
+                        <label style="font-size: 11px; margin-bottom: 4px;">Nombre</label>
+                        <input type="text" id="ext-name"
+                            style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border); padding: 8px; border-radius: 6px; color: white; font-size: 13px;">
+                    </div>
+                    <div class="form-group">
+                        <label style="font-size: 11px; margin-bottom: 4px;">Teléfono</label>
+                        <input type="text" id="ext-phone"
+                            style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border); padding: 8px; border-radius: 6px; color: white; font-size: 13px;">
+                    </div>
+                    <div class="form-group" style="grid-column: span 2;">
+                        <label style="font-size: 11px; margin-bottom: 4px;">Email</label>
+                        <input type="text" id="ext-email"
+                            style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border); padding: 8px; border-radius: 6px; color: white; font-size: 13px;">
+                    </div>
+                </div>
+                <button id="apply-extraction-btn" class="refresh-btn"
+                    style="width: 100%; margin-top: 15px; background: var(--success); border-color: var(--success);">💾
+                    Guardar como Datos Validados</button>
+                <p id="extraction-feedback" style="font-size: 11px; text-align: center; margin-top: 8px;"></p>
+            </div>
+
+            <div id="recording-section" style="display: none;">
+                <div class="section-title">🔊 Grabación</div>
+                <audio id="modal-audio" class="audio-player" controls>
+                    Tu navegador no soporta el elemento de audio.
+                </audio>
+            </div>
+
+            <div id="error-section"
+                style="display: none; background: rgba(239, 68, 68, 0.1); border: 1px solid var(--danger); border-radius: 8px; padding: 16px; margin-bottom: 24px;">
+                <div class="section-title" style="color: var(--danger); margin-bottom: 8px;">❌ Error en la Llamada</div>
+                <div id="modal-error-detail" style="color: var(--text-primary); font-size: 14px; line-height: 1.5;">
+                </div>
+            </div>
+
+            <div id="confirmed-section"
+                style="display: none; background: rgba(245, 158, 11, 0.1); padding: 16px; border-radius: 12px; border: 1px solid var(--warning); margin-bottom: 24px;">
+                <div class="section-title" style="margin-bottom: 4px; font-size: 14px; color: var(--warning);">📊 Datos
+                    Extraídos para el Gerente</div>
+                <p style="font-size: 11px; color: var(--text-secondary); margin: 0 0 10px 0;">Información confirmada o
+                    extraída de la conversación telefónica</p>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; font-size: 14px;">
+                    <p style="margin: 0;"><strong
+                            style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;">Nombre
+                            Confirmado</strong><br><span id="conf-name" style="color: var(--warning);"></span></p>
+                    <p style="margin: 0;"><strong
+                            style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;">Teléfono
+                            Confirmado</strong><br><span id="conf-phone" style="color: var(--warning);"></span></p>
+                    <p style="margin: 0; grid-column: span 2;"><strong
+                            style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;">Email
+                            Confirmado</strong><br><span id="conf-email" style="color: var(--warning);"></span></p>
+                </div>
+            </div>
+            <div class="section-title">📝 Notas del Agente</div>
+
+            <textarea id="modal-notes" class="notes-area"
+                placeholder="Escribe aquí tus observaciones sobre la llamada..."></textarea>
+            <button id="save-notes-btn" class="refresh-btn" style="width: 100%; margin-top: 10px;">💾 Guardar
+                Notas</button>
+        </div>
+    </div>
+
+    <!-- Floating Action Button for Manual Call -->
+    <button id="manual-call-fab" class="fab" title="Nueva Llamada Manual">
+        <span>📞</span>
+    </button>
+
+    <!-- Modal for Manual Call -->
+    <div class="modal" id="manual-call-modal">
+        <div class="modal-content">
+            <button class="close-modal" id="close-manual-modal">×</button>
+            <div class="modal-header">
+                <h2>📞 Nueva Llamada Manual</h2>
+                <p style="color: var(--text-secondary); font-size: 14px; margin-top: 4px;">Introduce los datos del
+                    cliente para forzar la llamada</p>
+            </div>
+
+            <div class="form-group">
+                <label for="manual-lead-name">Nombre del Cliente</label>
+                <input type="text" id="manual-lead-name" placeholder="Ej: Juan Pérez" required>
+            </div>
+
+            <div class="form-group">
+                <label for="manual-company">Empresa / Nombre Comercial</label>
+                <input type="text" id="manual-company" placeholder="Ej: Talleres Pérez" required>
+            </div>
+
+            <div class="form-group">
+                <label for="manual-assistant">Asistente IA</label>
+                <select id="manual-assistant" class="filter-select"
+                    style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border); padding: 14px 18px; border-radius: 12px; color: white; font-size: 15px;">
+                    <option value="49e56db1-1f20-4cf1-b031-9cea9fba73cb">V1 — Violeta (original)</option>
+                    <option value="f34469b5-334e-4fbf-b5ad-b2b05e8d76ee">V2 — Marcos (amable)</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="manual-phone">Teléfono</label>
+                <input type="tel" id="manual-phone" placeholder="Ej: 600123456" required>
+            </div>
+
+            <div class="form-group"
+                style="background: rgba(255,255,255,0.03); padding: 16px; border-radius: 12px; border: 1px dashed var(--border);">
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
+                    <input type="checkbox" id="manual-schedule-toggle"
+                        style="width: 18px; height: 18px; cursor: pointer;">
+                    <label for="manual-schedule-toggle"
+                        style="margin-bottom: 0; cursor: pointer; font-weight: 600; color: var(--text-primary);">📅
+                        Programar para más tarde</label>
+                </div>
+                <div id="manual-schedule-fields" style="display: none;">
+                    <input type="datetime-local" id="manual-schedule-time"
+                        style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border); padding: 12px; border-radius: 8px; color: white; font-size: 14px;">
+                    <p style="font-size: 11px; color: var(--text-secondary); margin-top: 8px;">La llamada se lanzará
+                        automáticamente a la hora elegida (±1 min).</p>
+                </div>
+            </div>
+
+            <button id="trigger-call-btn" class="refresh-btn"
+                style="width: 100%; margin-top: 20px; background: var(--success); border-color: var(--success);">
+                🚀 Lanzar Llamada
+            </button>
+
+            <div id="call-feedback" style="margin-top: 15px; text-align: center; font-weight: 500; min-height: 24px;">
+            </div>
+        </div>
+    </div>
+
+    <!-- Lead Editor Modal -->
+    <div id="lead-modal" class="modal">
+        <div class="modal-content glass-effect">
+            <button class="close-modal" id="close-lead-modal">×</button>
+            <div class="modal-header">
+                <h2 id="lead-modal-title">✨ Gestión de Lead</h2>
+                <p style="color: var(--text-secondary); font-size: 14px; margin-top: 4px;">Edita o añade información del
+                    lead</p>
+            </div>
+            <form id="lead-form">
+                <input type="hidden" id="edit-lead-id">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px;">
+                    <div class="form-group">
+                        <label for="edit-lead-name">Empresa</label>
+                        <input type="text" id="edit-lead-name" required placeholder="Nombre de la empresa">
+                    </div>
+                    <div class="form-group">
+                        <label for="edit-lead-phone">Teléfono</label>
+                        <input type="text" id="edit-lead-phone" required placeholder="+34...">
+                    </div>
+                    <div class="form-group">
+                        <label for="edit-lead-email">Email</label>
+                        <input type="email" id="edit-lead-email" placeholder="correo@empresa.com">
+                    </div>
+                    <div class="form-group">
+                        <label for="edit-lead-sector">Sector</label>
+                        <input type="text" id="edit-lead-sector" placeholder="Ej: Construcción">
+                    </div>
+                    <div class="form-group">
+                        <label for="edit-lead-status">Estado</label>
+                        <select id="edit-lead-status" class="filter-select"
+                            style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border); padding: 14px 18px; border-radius: 12px; color: white; font-size: 15px;">
+                            <option value="Nuevo">Nuevo</option>
+                            <option value="Programado">Programado</option>
+                            <option value="Interesado">Interesado</option>
+                            <option value="Completado">Completado</option>
+                            <option value="Contestador">📞 Contestador</option>
+                            <option value="Reintentar">Reintentar</option>
+                            <option value="Fallido">Fallido</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="grid-column: span 2;">
+                        <label for="edit-lead-summary">Resumen / Notas IA</label>
+                        <textarea id="edit-lead-summary" placeholder="Resumen de la empresa o notas de la IA..."
+                            style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border); padding: 14px 18px; border-radius: 12px; color: white; font-size: 15px; min-height: 80px;"></textarea>
+                    </div>
+                    <div class="form-group" style="grid-column: span 2;">
+                        <label for="edit-lead-address">Dirección / URL</label>
+                        <input type="text" id="edit-lead-address" placeholder="Dirección física o URL del sitio">
+                    </div>
+                    <div class="form-group" style="grid-column: span 2;">
+                        <label for="edit-lead-planned">📅 Programar Llamada</label>
+                        <input type="datetime-local" id="edit-lead-planned"
+                            style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border); padding: 14px 18px; border-radius: 12px; color: white; font-size: 15px;">
+                    </div>
+                </div>
+                <div style="margin-top: 24px; display: flex; gap: 12px; justify-content: flex-end;">
+                    <button type="button" class="refresh-btn" style="background: var(--border); border: none;"
+                        id="cancel-lead-save">Cancelar</button>
+                    <button type="submit" class="refresh-btn" id="save-lead-btn">Guardar Cambios</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <footer class="dashboard-footer">
+        <div class="footer-left">
+            <span>&copy; 2026 SkyPulse - GeneralProtect</span>
+            <span class="footer-separator">|</span>
+            <span id="system-status"><span class="status-dot"></span> Sistema Activo</span>
+        </div>
+        <div class="footer-right">
+            <span class="icon">📍</span>
+            <span id="local-time-label" style="font-size: 11px; color: var(--text-secondary); margin-right: 5px;">Hora
+                Local (España):</span>
+            <span id="live-clock" class="live-clock">--:--:--</span>
+        </div>
+    </footer>
+
+    <script src="./config.js"></script>
+    <script type="module" src="./main.js"></script>
+</body>
+
+</html>
