@@ -205,7 +205,7 @@
         },
         {
             "parameters": {
-                "jsCode": "// Extract leads from NocoDB response and filter only those that are due now\nconst input = $input.first().json;\nconst leads = input.list || [];\nconst now = new Date();\n\nconst dueLeads = leads.filter(lead => {\n  if (!lead.fecha_planificada) return false;\n  const plannedDate = new Date(lead.fecha_planificada);\n  return !isNaN(plannedDate.getTime()) && plannedDate <= now;\n});\n\nif (dueLeads.length === 0) {\n  return []; // No leads due — stop execution\n}\n\n// Return each due lead as a separate item for batch processing\nreturn dueLeads.map(lead => {\n  // Normalize phone number\n  let phone = String(lead.phone || '').replace(/\\D/g, '');\n  if (phone && !phone.startsWith('34')) phone = '34' + phone;\n  if (phone) phone = '+' + phone;\n\n  return {\n    json: {\n      leadId: lead.unique_id,\n      name: lead.name || 'Cliente',\n      phone: phone,\n      address: lead.address || lead.Localidad || 'su localidad',\n      email: lead.email || '',\n      assistant_id: lead.assistant_id || '',\n      fecha_planificada: lead.fecha_planificada\n    }\n  };\n});"
+                "jsCode": "// Extract leads from NocoDB response and filter only those that are due now\nconst input = $input.first().json;\nconst leads = input.list || [];\nconst now = new Date();\n\nconst dueLeads = leads.filter(lead => {\n  if (!lead.fecha_planificada) return false;\n  const plannedDate = new Date(lead.fecha_planificada);\n  return !isNaN(plannedDate.getTime()) && plannedDate <= now;\n});\n\nif (dueLeads.length === 0) {\n  return []; // No leads due — stop execution\n}\n\n// Return each due lead as a separate item for batch processing\nreturn dueLeads.map(lead => {\n  // Normalize phone number\n  let phone = String(lead.phone || '').replace(/\\D/g, '');\n  if (phone && !phone.startsWith('34')) phone = '34' + phone;\n  if (phone) phone = '+' + phone;\n\n  return {\n    json: {\n      leadId: lead.unique_id,\n      leadRowId: lead.Id,\n      name: lead.name || 'Cliente',\n      phone: phone,\n      address: lead.address || lead.Localidad || 'su localidad',\n      email: lead.email || '',\n      assistant_id: lead.assistant_id || '',\n      fecha_planificada: lead.fecha_planificada\n    }\n  };\n});"
             },
             "id": "filter-due-leads",
             "name": "Filter Due Leads",
@@ -213,6 +213,20 @@
             "typeVersion": 2,
             "position": [
                 800,
+                600
+            ]
+        },
+        {
+            "parameters": {
+                "batchSize": 1,
+                "options": {}
+            },
+            "id": "batch-calls",
+            "name": "One at a Time",
+            "type": "n8n-nodes-base.splitInBatches",
+            "typeVersion": 3,
+            "position": [
+                1000,
                 600
             ]
         },
@@ -243,10 +257,56 @@
             "type": "n8n-nodes-base.httpRequest",
             "typeVersion": 4.2,
             "position": [
-                1000,
+                1200,
                 600
             ],
             "onError": "continueRegularOutput"
+        },
+        {
+            "parameters": {
+                "jsCode": "// Validate Vapi call response — only proceed if we got a real call ID\nconst vapiResponse = $input.first().json;\nconst callId = vapiResponse.id || '';\nconst leadData = $('One at a Time').item.json;\n\n// Check if Vapi actually created the call\nif (!callId || callId === 'unknown' || callId.length < 10) {\n  // Vapi call FAILED — mark lead as Fallido to prevent infinite retry\n  // and stop the pipeline from creating phantom log entries\n  return {\n    json: {\n      callSuccess: false,\n      vapiCallId: 'FAILED',\n      leadRowId: leadData.leadRowId,\n      leadId: leadData.leadId,\n      name: leadData.name,\n      phone: leadData.phone,\n      error: vapiResponse.message || vapiResponse.error || 'No call ID returned'\n    }\n  };\n}\n\n// Call succeeded\nreturn {\n  json: {\n    callSuccess: true,\n    vapiCallId: callId,\n    leadRowId: leadData.leadRowId,\n    leadId: leadData.leadId,\n    name: leadData.name,\n    phone: leadData.phone\n  }\n};"
+            },
+            "id": "check-call-success",
+            "name": "Check Call Success",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1400,
+                600
+            ]
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "options": {
+                        "caseSensitive": true,
+                        "leftValue": "",
+                        "typeValidation": "strict"
+                    },
+                    "conditions": [
+                        {
+                            "id": "call-success-check",
+                            "leftValue": "={{ $json.callSuccess }}",
+                            "rightValue": true,
+                            "operator": {
+                                "type": "boolean",
+                                "operation": "equals",
+                                "name": "filter.operator.equals"
+                            }
+                        }
+                    ],
+                    "combinator": "and"
+                },
+                "options": {}
+            },
+            "id": "if-call-succeeded",
+            "name": "Call Succeeded?",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                1600,
+                600
+            ]
         },
         {
             "parameters": {
@@ -267,7 +327,7 @@
                 },
                 "sendBody": true,
                 "specifyBody": "json",
-                "jsonBody": "={{ JSON.stringify({ vapi_call_id: $json.id || 'unknown', lead_name: $('Filter Due Leads').item.json.name, phone_called: $('Filter Due Leads').item.json.phone, call_time: new Date().toISOString(), ended_reason: 'Call Initiated' }) }}",
+                "jsonBody": "={{ JSON.stringify({ vapi_call_id: $json.vapiCallId, lead_name: $json.name, phone_called: $json.phone, call_time: new Date().toISOString(), ended_reason: 'Call Initiated' }) }}",
                 "options": {}
             },
             "id": "log-call-nocodb",
@@ -275,8 +335,8 @@
             "type": "n8n-nodes-base.httpRequest",
             "typeVersion": 4.2,
             "position": [
-                1200,
-                600
+                1800,
+                500
             ],
             "onError": "continueRegularOutput"
         },
@@ -299,18 +359,64 @@
                 },
                 "sendBody": true,
                 "specifyBody": "json",
-                "jsonBody": "={{ JSON.stringify([{ unique_id: $('Filter Due Leads').item.json.leadId, status: 'Completado', fecha_planificada: null }]) }}",
+                "jsonBody": "={{ JSON.stringify([{ Id: $('Check Call Success').item.json.leadRowId, status: 'Completado', fecha_planificada: null }]) }}",
                 "options": {}
             },
-            "id": "update-lead-status",
-            "name": "Update Lead Status",
+            "id": "update-lead-success",
+            "name": "Update Lead (Success)",
             "type": "n8n-nodes-base.httpRequest",
             "typeVersion": 4.2,
             "position": [
-                1400,
-                600
+                2000,
+                500
             ],
             "onError": "continueRegularOutput"
+        },
+        {
+            "parameters": {
+                "method": "PATCH",
+                "url": "https://optima-nocodb.vhsxer.easypanel.host/api/v2/tables/mf0wzufqcpi3bd1/records",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "xc-token",
+                            "value": "vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={{ JSON.stringify([{ Id: $json.leadRowId, status: 'Fallido', fecha_planificada: null }]) }}",
+                "options": {}
+            },
+            "id": "update-lead-failed",
+            "name": "Update Lead (Failed)",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                1800,
+                750
+            ],
+            "onError": "continueRegularOutput"
+        },
+        {
+            "parameters": {
+                "amount": 15,
+                "unit": "seconds"
+            },
+            "id": "wait-between-calls",
+            "name": "Wait 15s",
+            "type": "n8n-nodes-base.wait",
+            "typeVersion": 1.1,
+            "position": [
+                2200,
+                500
+            ]
         }
     ],
     "connections": {
@@ -389,18 +495,59 @@
             "main": [
                 [
                     {
-                        "node": "Launch Vapi Call",
+                        "node": "One at a Time",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
+        "One at a Time": {
+            "main": [
+                [
+                    {
+                        "node": "Launch Vapi Call",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                []
+            ]
+        },
         "Launch Vapi Call": {
             "main": [
                 [
                     {
+                        "node": "Check Call Success",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Check Call Success": {
+            "main": [
+                [
+                    {
+                        "node": "Call Succeeded?",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Call Succeeded?": {
+            "main": [
+                [
+                    {
                         "node": "Log Call to NocoDB",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Update Lead (Failed)",
                         "type": "main",
                         "index": 0
                     }
@@ -411,7 +558,40 @@
             "main": [
                 [
                     {
-                        "node": "Update Lead Status",
+                        "node": "Update Lead (Success)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Update Lead (Success)": {
+            "main": [
+                [
+                    {
+                        "node": "Wait 15s",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Wait 15s": {
+            "main": [
+                [
+                    {
+                        "node": "One at a Time",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Update Lead (Failed)": {
+            "main": [
+                [
+                    {
+                        "node": "Wait 15s",
                         "type": "main",
                         "index": 0
                     }

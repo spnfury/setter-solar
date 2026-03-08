@@ -3148,10 +3148,16 @@ async function loadData(skipEnrichment = false) {
         }
 
         // Pre-fetch confirmed data in parallel with call logs
-        const [calls] = await Promise.all([
+        const [rawCalls] = await Promise.all([
             fetchData(CALL_LOGS_TABLE),
             fetchConfirmedData()
         ]);
+
+        // Safety filter: exclude phantom call_logs (failed Vapi calls logged with unknown ID)
+        const calls = rawCalls.filter(c => c.vapi_call_id && c.vapi_call_id !== 'unknown');
+        if (rawCalls.length !== calls.length) {
+            console.warn(`[Dashboard] Filtered out ${rawCalls.length - calls.length} phantom call_logs (vapi_call_id=unknown)`);
+        }
 
         // Auto-evaluate confirmed calls that have no evaluation yet
         calls.forEach(call => {
