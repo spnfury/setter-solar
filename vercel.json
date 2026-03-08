@@ -46,19 +46,7 @@
             ]
         }
     ],
-    "redirects": [
-        {
-            "source": "/:path*",
-            "has": [
-                {
-                    "type": "host",
-                    "value": "skypulsebot-five.vercel.app"
-                }
-            ],
-            "destination": "https://skypulsebot.vercel.app/:path*",
-            "permanent": true
-        }
-    ],
+    "redirects": [],
     "rewrites": [
         {
             "source": "/vapi-api/:path*",

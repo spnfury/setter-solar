@@ -16,14 +16,14 @@
  *   node retry_call.mjs +34968630135
  */
 
-const VAPI_API_KEY = '852080ba-ce7c-4778-b218-bf718613a2b6';
-const ASSISTANT_ID = '49e56db1-1f20-4cf1-b031-9cea9fba73cb';
-const PHONE_NUMBER_ID = '611c8c8e-ab43-4af0-8df0-f2f8fac8115b';
+const VAPI_API_KEY = '0594f41c-e836-425d-aaa2-1c5b7d9e506e';
+const ASSISTANT_ID = 'f3359bb0-7bc4-45c7-9a02-ca4793cc5d48';
+const PHONE_NUMBER_ID = 'e774df77-8fd0-4a17-a815-2acf8b6e3c2b';
 
-const NOCODB_BASE = 'https://nocodb.srv889387.hstgr.cloud/api/v2/tables';
-const LEADS_TABLE = 'mgot1kl4sglenym';
-const CALL_LOGS_TABLE = 'm013en5u2cyu30j';
-const XC_TOKEN = 'jx3uoKeVaidZLF7M0skVb9pV6yvNsam0Hu-Vfeww';
+const NOCODB_BASE = 'https://optima-nocodb.vhsxer.easypanel.host/api/v2/tables';
+const LEADS_TABLE = 'mf0wzufqcpi3bd1';
+const CALL_LOGS_TABLE = 'm73w58ba47ifkrx';
+const XC_TOKEN = 'vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d';
 
 const MAX_CONCURRENT_CALLS = 10;
 

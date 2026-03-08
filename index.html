@@ -7,7 +7,7 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <title>Dashboard de Llamadas - GeneralProtect</title>
+    <title>Dashboard de Llamadas - Setter Solar</title>
     <link rel="icon" type="image/png" href="./favicon.png">
     <link rel="stylesheet" href="./style.css">
     <!-- Extra Dependencies -->
@@ -23,7 +23,7 @@
     <!-- Login Gate -->
     <div id="login-gate" class="login-overlay">
         <div class="login-card">
-            <img src="./logo.png" alt="SkyPulse" class="brand-logo">
+            <img src="./logo.png" alt="Setter Solar" class="brand-logo">
             <h2>Acceso al Dashboard</h2>
             <p>Introduce la contraseña para continuar</p>
             <form id="login-form">
@@ -38,9 +38,9 @@
     <div class="container" id="main-content">
         <header>
             <h1>
-                <img src="./logo.png" alt="SkyPulse" class="header-logo">
-                SkyPulse Dashboard <small
-                    style="font-size: 12px; color: var(--text-secondary); margin-left: 8px; font-weight: 400;">v0.0.6</small>
+                <img src="./logo.png" alt="Setter Solar" class="header-logo">
+                Setter Solar Dashboard <small
+                    style="font-size: 12px; color: var(--text-secondary); margin-left: 8px; font-weight: 400;">v0.0.7</small>
             </h1>
             <div class="header-actions">
                 <div class="automation-control">
@@ -57,13 +57,14 @@
         <nav class="nav-tabs">
             <div class="nav-tab active" data-tab="dashboard">📊 Dashboard</div>
             <div class="nav-tab" data-tab="leads">👥 Gestión de Leads</div>
+            <div class="nav-tab" data-tab="appointments">📅 Citas</div>
             <div class="nav-tab" data-tab="scheduler">📅 Programar Llamadas</div>
             <div class="nav-tab" data-tab="realtime" id="nav-tab-realtime">🔴 En Vivo <span id="realtime-badge"
                     class="realtime-badge" style="display:none;">0</span></div>
             <div class="nav-tab" data-tab="reports">📈 Informes</div>
             <div class="nav-tab" data-tab="test">🧪 Test</div>
             <div class="nav-tab" data-tab="agents">🤖 Agentes</div>
-            <div class="nav-tab" data-tab="changelog">📝 Changelog</div>
+            <div class="nav-tab" data-tab="errorlogs">🚨 Error Logs</div>
         </nav>
 
         <!-- Tab 1: Dashboard View -->
@@ -127,11 +128,11 @@
                 </div>
                 <div class="stat-card warning">
                     <div class="stat-value" id="confirmed-count"><span class="skeleton-value"></span></div>
-                    <div class="stat-label">Confirmados</div>
+                    <div class="stat-label">Citas Agendadas</div>
                 </div>
                 <div class="stat-card success">
                     <div class="stat-value" id="confirmation-rate"><span class="skeleton-value"></span></div>
-                    <div class="stat-label">% Confirmados</div>
+                    <div class="stat-label">% Citas</div>
                 </div>
                 <div class="stat-card success">
                     <div class="stat-value" id="success-rate"><span class="skeleton-value"></span></div>
@@ -184,7 +185,12 @@
                 </div>
                 <div class="leads-actions">
                     <input type="file" id="csv-import" accept=".csv" style="display: none;">
-                    <button class="btn-bulk-import" id="btn-import-csv">📂 Importar CSV</button>
+                    <button class="btn-bulk-import" id="btn-import-csv"
+                        style="background: rgba(16, 185, 129, 0.1); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.2);">📂
+                        Importar CSV</button>
+                    <button id="btn-delete-all-leads"
+                        style="background: red; color: white; border: none; padding: 10px 15px; border-radius: 8px; font-weight: bold; cursor: pointer; margin-right: 10px;">🗑️
+                        Borrar Todo</button>
                     <button class="btn-add-lead" id="btn-add-lead">✨ Nuevo Lead</button>
                 </div>
             </div>
@@ -263,19 +269,185 @@
                         <tr>
                             <th>Acciones</th>
                             <th>Empresa</th>
-                            <th>Sector</th>
+                            <th>Sector / Localidad</th>
                             <th>Teléfono</th>
                             <th>Email</th>
                             <th>Estado</th>
+                            <th>Info</th>
                             <th>Próxima Llamada</th>
                         </tr>
                     </thead>
                     <tbody id="leads-master-table">
                         <tr>
-                            <td colspan="7" class="loading">Cargando lista de leads...</td>
+                            <td colspan="8" class="loading">Cargando lista de leads...</td>
                         </tr>
                     </tbody>
                 </table>
+            </div>
+        </div>
+
+        <!-- Tab: Appointments View -->
+        <div id="view-appointments" class="view-content">
+            <div class="leads-header">
+                <div class="leads-header-info">
+                    <h2 style="margin: 0; font-size: 20px; display: flex; align-items: center; gap: 10px;">📅 Agenda de
+                        Citas</h2>
+                    <p style="color: var(--text-secondary); font-size: 13px; margin-top: 4px;">Visitas técnicas
+                        confirmadas por la asistente virtual Carolina.</p>
+                </div>
+                <div class="header-actions" style="gap: 10px;">
+                    <button class="btn-add-lead" id="btn-new-appointment" style="padding: 10px 18px; font-size: 13px;">➕
+                        Nueva Cita</button>
+                    <button class="refresh-btn" id="refresh-appointments-btn">🔄 Actualizar</button>
+                </div>
+            </div>
+
+            <!-- Appointments KPI -->
+            <div class="appt-kpi-section" id="appt-kpi-section">
+                <div class="leads-kpi-card leads-kpi-total">
+                    <div class="leads-kpi-icon">📋</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="appt-kpi-total"><span class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">Total Citas</div>
+                    </div>
+                </div>
+                <div class="leads-kpi-card" style="border-left: 3px solid #22c55e;">
+                    <div class="leads-kpi-icon">🟢</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="appt-kpi-upcoming" style="color: #4ade80;"><span
+                                class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">Próximas</div>
+                    </div>
+                </div>
+                <div class="leads-kpi-card" style="border-left: 3px solid #3b82f6;">
+                    <div class="leads-kpi-icon">📍</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="appt-kpi-today" style="color: #60a5fa;"><span
+                                class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">Hoy</div>
+                    </div>
+                </div>
+                <div class="leads-kpi-card" style="border-left: 3px solid #94a3b8;">
+                    <div class="leads-kpi-icon">✅</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="appt-kpi-past" style="color: #94a3b8;"><span
+                                class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">Pasadas</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Weekly Calendar View -->
+            <div class="appt-calendar-section glass-effect" id="appt-calendar-section">
+                <div class="appt-calendar-header">
+                    <button class="appt-cal-nav" id="appt-cal-prev">‹</button>
+                    <div class="appt-cal-title" id="appt-cal-title">Esta semana</div>
+                    <button class="appt-cal-nav" id="appt-cal-next">›</button>
+                </div>
+                <div class="appt-calendar-grid" id="appt-calendar-grid">
+                    <!-- JS will populate 7 day columns -->
+                </div>
+            </div>
+
+            <!-- Appointments Table -->
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Estado</th>
+                            <th>Fecha y Hora</th>
+                            <th>Cliente</th>
+                            <th>Teléfono</th>
+                            <th>Email</th>
+                            <th>Llamada Origen</th>
+                            <th>Acciones</th>
+                        </tr>
+                    </thead>
+                    <tbody id="appointments-table">
+                        <tr>
+                            <td colspan="7" class="loading">Cargando citas...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Modal: Nueva Cita Manual -->
+        <div class="modal" id="new-appointment-modal">
+            <div class="modal-content" style="max-width: 520px;">
+                <button class="close-modal" id="close-appointment-modal">×</button>
+                <div class="modal-header">
+                    <h2>➕ Nueva Cita Manual</h2>
+                    <p style="color: var(--text-secondary); font-size: 13px; margin-top: 4px;">Crear una cita
+                        directamente sin pasar por la asistente.</p>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 16px; margin-top: 20px;">
+                    <div class="form-group">
+                        <label
+                            style="font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; display: block;">📅
+                            Fecha y Hora</label>
+                        <input type="datetime-local" id="new-appt-datetime" class="sched-input" style="width: 100%;">
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                        <div class="form-group">
+                            <label
+                                style="font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; display: block;">👤
+                                Nombre del Cliente</label>
+                            <input type="text" id="new-appt-name" placeholder="Ej: Juan García" class="sched-input"
+                                style="width: 100%;">
+                        </div>
+                        <div class="form-group">
+                            <label
+                                style="font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; display: block;">📞
+                                Teléfono</label>
+                            <input type="text" id="new-appt-phone" placeholder="Ej: 666123456" class="sched-input"
+                                style="width: 100%;">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label
+                            style="font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; display: block;">📧
+                            Email (opcional)</label>
+                        <input type="email" id="new-appt-email" placeholder="Ej: juan@email.com" class="sched-input"
+                            style="width: 100%;">
+                    </div>
+                    <button id="save-new-appointment-btn" class="sched-btn sched-btn-execute"
+                        style="width: 100%; margin-top: 8px;">💾 Guardar Cita</button>
+                    <div id="new-appt-feedback" style="text-align: center; font-size: 13px; min-height: 20px;"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Modal: Nuevo Lead de Prueba -->
+        <div class="modal" id="test-lead-modal">
+            <div class="modal-content" style="max-width: 520px;">
+                <button class="close-modal" id="close-test-lead-modal">×</button>
+                <div class="modal-header">
+                    <h2>🧪 Añadir Lead de Prueba</h2>
+                    <p style="color: var(--text-secondary); font-size: 13px; margin-top: 4px;">Crea un lead falso
+                        rápidamente para probar la programación de llamadas.</p>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 16px; margin-top: 20px;">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                        <div class="form-group">
+                            <label
+                                style="font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; display: block;">👤
+                                Nombre (Opcional)</label>
+                            <input type="text" id="test-lead-name" placeholder="Ej: Test Lead" class="sched-input"
+                                style="width: 100%;">
+                        </div>
+                        <div class="form-group">
+                            <label
+                                style="font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; display: block;">📞
+                                Teléfono</label>
+                            <input type="text" id="test-lead-phone" placeholder="Ej: 666123456" class="sched-input"
+                                style="width: 100%;">
+                        </div>
+                    </div>
+                    <button id="save-test-lead-btn" class="sched-btn sched-btn-execute"
+                        style="width: 100%; margin-top: 8px;">💾 Guardar y Añadir a Base de Datos</button>
+                    <div id="test-lead-feedback" style="text-align: center; font-size: 13px; min-height: 20px;"></div>
+                </div>
             </div>
         </div>
 
@@ -383,18 +555,33 @@
                             <div class="form-group">
                                 <label for="sched-assistant" class="sched-config-label">🤖 Asistente IA</label>
                                 <select id="sched-assistant" class="sched-select">
-                                    <option value="49e56db1-1f20-4cf1-b031-9cea9fba73cb">V1 — Violeta (original)
+                                    <option value="f3359bb0-7bc4-45c7-9a02-ca4793cc5d48">☀️ Carolina Solar — Setter
+                                        Solar
                                     </option>
-                                    <option value="f34469b5-334e-4fbf-b5ad-b2b05e8d76ee">V2 — Marcos (amable)</option>
                                 </select>
                             </div>
                         </div>
                     </div>
 
                     <div class="sched-action-bar">
+                        <button id="sched-test-lead-btn" class="sched-btn"
+                            style="background: rgba(16, 185, 129, 0.1); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.2);">➕
+                            Añadir Lead de Prueba</button>
                         <button id="sched-preview-btn" class="sched-btn sched-btn-preview">🔍 Ver Preview</button>
-                        <button id="sched-execute-btn" class="sched-btn sched-btn-execute" disabled>🚀 Programar
+                        <button id="sched-execute-btn" class="sched-btn sched-btn-execute">🚀 Programar
                             Llamadas</button>
+                    </div>
+                </div>
+
+                <!-- Scheduled Calls List -->
+                <div id="sched-scheduled-calls" class="scheduler-summary glass-effect" style="display: none;">
+                    <div
+                        style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                        <div class="section-title" style="margin: 0;">📋 Llamadas Programadas</div>
+                        <div id="sched-scheduled-stats"
+                            style="display: flex; gap: 12px; font-size: 13px; color: var(--text-secondary);"></div>
+                    </div>
+                    <div id="sched-scheduled-list" style="max-height: 400px; overflow-y: auto; padding-right: 8px;">
                     </div>
                 </div>
 
@@ -567,8 +754,8 @@
                     <div class="form-group" style="flex: 1;">
                         <label for="agent-select" class="sched-config-label">🤖 Seleccionar Asistente</label>
                         <select id="agent-select" class="sched-select">
-                            <option value="49e56db1-1f20-4cf1-b031-9cea9fba73cb">V1 — Violeta (original)</option>
-                            <option value="f34469b5-334e-4fbf-b5ad-b2b05e8d76ee">V2 — Marcos (amable)</option>
+                            <option value="f3359bb0-7bc4-45c7-9a02-ca4793cc5d48">☀️ Carolina Solar — Setter Solar
+                            </option>
                         </select>
                     </div>
                     <button id="agent-load-btn" class="refresh-btn" style="align-self: flex-end; margin-bottom: 2px;">📥
@@ -616,19 +803,81 @@
             </div>
         </div>
 
-        <!-- Tab 8: Changelog View -->
-        <div id="view-changelog" class="view-content">
+        <!-- Tab 8: Error Logs View -->
+        <div id="view-errorlogs" class="view-content">
             <div class="changelog-header">
                 <div class="changelog-header-info">
-                    <h2 style="margin: 0; font-size: 20px; display: flex; align-items: center; gap: 10px;">📝 Registro
-                        de Cambios</h2>
-                    <p style="color: var(--text-secondary); font-size: 13px; margin-top: 4px;">Historial día a día de
-                        todas las mejoras, correcciones y nuevas funcionalidades implementadas en la plataforma.</p>
+                    <h2 style="margin: 0; font-size: 20px; display: flex; align-items: center; gap: 10px;">🚨 Registro
+                        de Errores API</h2>
+                    <p style="color: var(--text-secondary); font-size: 13px; margin-top: 4px;">Historial persistente de
+                        errores HTTP (404, 500, etc.) de todas las peticiones API del sistema.</p>
+                </div>
+                <div class="header-actions" style="gap: 10px;">
+                    <button class="refresh-btn" id="errorlogs-refresh-btn">🔄 Actualizar</button>
+                    <button class="refresh-btn" id="errorlogs-download-btn"
+                        style="background: rgba(59,130,246,0.1); border-color: rgba(59,130,246,0.3); color: #60a5fa;">📥
+                        Descargar JSON</button>
+                    <button class="refresh-btn" id="errorlogs-clear-btn"
+                        style="background: rgba(239,68,68,0.1); border-color: rgba(239,68,68,0.3); color: #f87171;">🗑️
+                        Borrar Todo</button>
                 </div>
             </div>
-            <div id="changelog-timeline" class="changelog-timeline">
-                <div class="loading" style="text-align: center; padding: 60px; color: var(--text-secondary);">Cargando
-                    changelog...</div>
+
+            <!-- Error Logs KPIs -->
+            <div class="leads-kpi-section" id="errorlogs-kpi-section">
+                <div class="leads-kpi-card leads-kpi-total">
+                    <div class="leads-kpi-icon">📊</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="errorlogs-kpi-total"><span class="skeleton-value sm"></span>
+                        </div>
+                        <div class="leads-kpi-label">Total Errores</div>
+                    </div>
+                </div>
+                <div class="leads-kpi-card" style="border-left: 3px solid #f59e0b;">
+                    <div class="leads-kpi-icon">⚠️</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="errorlogs-kpi-404" style="color: #fbbf24;"><span
+                                class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">HTTP 404</div>
+                    </div>
+                </div>
+                <div class="leads-kpi-card" style="border-left: 3px solid #ef4444;">
+                    <div class="leads-kpi-icon">🔴</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="errorlogs-kpi-500" style="color: #f87171;"><span
+                                class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">HTTP 5xx</div>
+                    </div>
+                </div>
+                <div class="leads-kpi-card" style="border-left: 3px solid #94a3b8;">
+                    <div class="leads-kpi-icon">🌐</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="errorlogs-kpi-network" style="color: #94a3b8;"><span
+                                class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">Red / Otros</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Error Logs Table -->
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Fecha / Hora</th>
+                            <th>Método</th>
+                            <th>Status</th>
+                            <th>Contexto</th>
+                            <th>URL</th>
+                            <th>Detalle</th>
+                        </tr>
+                    </thead>
+                    <tbody id="errorlogs-table">
+                        <tr>
+                            <td colspan="6" class="loading">Cargando errores...</td>
+                        </tr>
+                    </tbody>
+                </table>
             </div>
         </div>
     </div>
@@ -780,17 +1029,17 @@
                 <input type="text" id="manual-lead-name" placeholder="Ej: Juan Pérez" required>
             </div>
 
+
             <div class="form-group">
-                <label for="manual-company">Empresa / Nombre Comercial</label>
-                <input type="text" id="manual-company" placeholder="Ej: Talleres Pérez" required>
+                <label for="manual-locality">Localidad</label>
+                <input type="text" id="manual-locality" placeholder="Ej: El Ejido" required>
             </div>
 
             <div class="form-group">
                 <label for="manual-assistant">Asistente IA</label>
                 <select id="manual-assistant" class="filter-select"
                     style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border); padding: 14px 18px; border-radius: 12px; color: white; font-size: 15px;">
-                    <option value="49e56db1-1f20-4cf1-b031-9cea9fba73cb">V1 — Violeta (original)</option>
-                    <option value="f34469b5-334e-4fbf-b5ad-b2b05e8d76ee">V2 — Marcos (amable)</option>
+                    <option value="f3359bb0-7bc4-45c7-9a02-ca4793cc5d48">☀️ Carolina Solar — Setter Solar</option>
                 </select>
             </div>
 
@@ -888,6 +1137,49 @@
                     <button type="submit" class="refresh-btn" id="save-lead-btn">Guardar Cambios</button>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <!-- Modal for CSV Mapping -->
+    <div class="modal" id="csv-mapping-modal">
+        <div class="modal-content" style="max-width: 800px;">
+            <button class="close-modal" id="close-csv-mapping-modal">×</button>
+            <div class="modal-header">
+                <h2>📋 Mapeo de Campos CSV</h2>
+                <p style="color: var(--text-secondary); font-size: 14px; margin-top: 4px;">Asocia las columnas de tu CSV
+                    con los campos del sistema.</p>
+            </div>
+
+            <div class="mapping-container">
+                <table class="mapping-table">
+                    <thead>
+                        <tr>
+                            <th>Columna CSV</th>
+                            <th>Campo Sistema</th>
+                            <th>Ejemplo de dato</th>
+                        </tr>
+                    </thead>
+                    <tbody id="csv-mapping-body">
+                        <!-- Mapping rows will be injected here -->
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="preview-container" style="margin-top: 24px;">
+                <div class="section-title" style="font-size: 14px;">👁️ Vista previa (primeras 3 filas)</div>
+                <div class="table-container" style="max-height: 200px; overflow-y: auto;">
+                    <table id="csv-preview-table">
+                        <thead id="csv-preview-head"></thead>
+                        <tbody id="csv-preview-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="modal-actions" style="margin-top: 24px; display: flex; gap: 12px;">
+                <button id="cancel-import-btn" class="action-btn" style="flex: 1; padding: 12px;">Cancelar</button>
+                <button id="confirm-import-btn" class="refresh-btn" style="flex: 2; padding: 12px;">🚀 Importar
+                    Leads</button>
+            </div>
         </div>
     </div>
 

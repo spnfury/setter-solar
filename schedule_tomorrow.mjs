@@ -10,9 +10,9 @@
  * Usage: node schedule_tomorrow.mjs [--dry-run] [--count 200] [--spacing 2]
  */
 
-const API_BASE = 'https://nocodb.srv889387.hstgr.cloud/api/v2/tables';
-const LEADS_TABLE = 'mgot1kl4sglenym';
-const XC_TOKEN = 'jx3uoKeVaidZLF7M0skVb9pV6yvNsam0Hu-Vfeww';
+const API_BASE = 'https://optima-nocodb.vhsxer.easypanel.host/api/v2/tables';
+const LEADS_TABLE = 'mf0wzufqcpi3bd1';
+const XC_TOKEN = 'vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d';
 
 // Parse args
 const args = process.argv.slice(2);

@@ -1,5 +1,5 @@
 // ── Configuration loaded from config.js (gitignored) ──
-const { API_BASE, CALL_LOGS_TABLE, CONFIRMED_TABLE, XC_TOKEN, VAPI_API_KEY, OPENAI_API_KEY } = window.APP_CONFIG;
+const { API_BASE, LEADS_TABLE, CALL_LOGS_TABLE, CONFIRMED_TABLE, ERROR_LOGS_TABLE, XC_TOKEN, VAPI_API_KEY, OPENAI_API_KEY, VAPI_PHONE_NUMBER_ID, VAPI_ASSISTANT_ID, ZADARMA_KEY, ZADARMA_SECRET, ZADARMA_FROM_NUMBER } = window.APP_CONFIG;
 
 let currentCalls = [];
 let allCalls = [];
@@ -12,18 +12,173 @@ let isEnriching = false; // Guard against multiple enrichment runs
 let paginationPage = 1;
 let paginationPageSize = 20;
 
+// ── Data Cache ── Avoid redundant API calls across tabs
+let _leadsCache = null;
+let _leadsCacheTime = 0;
+let _confirmedCache = null;
+let _confirmedCacheTime = 0;
+const DATA_CACHE_TTL = 60000; // 1 minute
+
+// ── Persistent API Error Logger (server-side via NocoDB) ──
+const API_ERROR_LOG_KEY = 'setter_api_error_log';
+const API_ERROR_LOG_MAX = 500;
+let _errorLogQueue = [];
+let _errorLogFlushing = false;
+
+function logApiError({ url, method, status, statusText, context, detail }) {
+    const entry = {
+        timestamp: new Date().toISOString(),
+        url: (url || '').substring(0, 500),
+        method: method || 'GET',
+        status: status || 0,
+        status_text: (statusText || '').substring(0, 200),
+        context: (context || '').substring(0, 200),
+        detail: (detail || '').substring(0, 500)
+    };
+    console.warn(`[ErrorLog] ${entry.method} ${entry.status} ${entry.url} — ${entry.context}`);
+
+    // Save to localStorage as backup
+    try {
+        const logs = JSON.parse(localStorage.getItem(API_ERROR_LOG_KEY) || '[]');
+        logs.push(entry);
+        if (logs.length > API_ERROR_LOG_MAX) logs.splice(0, logs.length - API_ERROR_LOG_MAX);
+        localStorage.setItem(API_ERROR_LOG_KEY, JSON.stringify(logs));
+    } catch (_) { }
+
+    // Queue for server persistence
+    _errorLogQueue.push(entry);
+    _flushErrorLogs();
+}
+
+async function _flushErrorLogs() {
+    if (_errorLogFlushing || _errorLogQueue.length === 0) return;
+    _errorLogFlushing = true;
+    try {
+        // Batch up to 10 at a time
+        const batch = _errorLogQueue.splice(0, 10);
+        await fetch(`${API_BASE}/${ERROR_LOGS_TABLE}/records`, {
+            method: 'POST',
+            headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+            body: JSON.stringify(batch)
+        });
+    } catch (e) {
+        console.warn('[ErrorLog] Failed to flush to server:', e.message);
+    } finally {
+        _errorLogFlushing = false;
+        // If more queued, flush again after a short delay
+        if (_errorLogQueue.length > 0) setTimeout(_flushErrorLogs, 2000);
+    }
+}
+
+async function getApiErrorsFromServer(limit = 100) {
+    try {
+        const res = await fetch(`${API_BASE}/${ERROR_LOGS_TABLE}/records?limit=${limit}&sort=-CreatedAt`, {
+            headers: { 'xc-token': XC_TOKEN }
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        return data.list || [];
+    } catch (e) {
+        console.error('[ErrorLog] Failed to fetch server logs:', e);
+        // Fallback to localStorage
+        return JSON.parse(localStorage.getItem(API_ERROR_LOG_KEY) || '[]');
+    }
+}
+
+function getApiErrors() {
+    try { return JSON.parse(localStorage.getItem(API_ERROR_LOG_KEY) || '[]'); }
+    catch { return []; }
+}
+
+function clearApiErrors() {
+    localStorage.removeItem(API_ERROR_LOG_KEY);
+    console.log('[ErrorLog] Logs locales borrados');
+}
+
+async function clearServerErrors() {
+    try {
+        const logs = await getApiErrorsFromServer(500);
+        if (logs.length === 0) { console.log('[ErrorLog] No hay logs en servidor'); return; }
+        for (let i = 0; i < logs.length; i += 50) {
+            const batch = logs.slice(i, i + 50);
+            await fetch(`${API_BASE}/${ERROR_LOGS_TABLE}/records`, {
+                method: 'DELETE',
+                headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+                body: JSON.stringify(batch.map(l => ({ Id: l.Id || l.id })))
+            });
+        }
+        console.log(`[ErrorLog] ${logs.length} logs borrados del servidor`);
+    } catch (e) {
+        console.error('[ErrorLog] Error borrando logs del servidor:', e);
+    }
+}
+
+function downloadApiErrors() {
+    const logs = getApiErrors();
+    const blob = new Blob([JSON.stringify(logs, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `api_errors_${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+}
+
+// Expose to console for manual inspection
+window._apiErrors = { get: getApiErrors, getServer: getApiErrorsFromServer, clear: clearApiErrors, clearServer: clearServerErrors, download: downloadApiErrors };
+
+async function fetchCachedLeads(forceRefresh = false) {
+    if (!forceRefresh && _leadsCache && (Date.now() - _leadsCacheTime) < DATA_CACHE_TTL) {
+        return _leadsCache;
+    }
+    let allRecords = [];
+    let offset = 0;
+    const batchSize = 200;
+    while (true) {
+        const res = await fetch(`${API_BASE}/${LEADS_TABLE}/records?limit=${batchSize}&offset=${offset}`, {
+            headers: { 'xc-token': XC_TOKEN }
+        });
+        const data = await res.json();
+        const records = data.list || [];
+        allRecords = allRecords.concat(records);
+        if (records.length < batchSize || data.pageInfo?.isLastPage !== false) break;
+        offset += batchSize;
+        if (allRecords.length >= 10000) break;
+    }
+    _leadsCache = allRecords;
+    _leadsCacheTime = Date.now();
+    return allRecords;
+}
+
+function invalidateLeadsCache() {
+    _leadsCache = null;
+    _leadsCacheTime = 0;
+}
+
+function invalidateConfirmedCache() {
+    _confirmedCache = null;
+    _confirmedCacheTime = 0;
+}
+
+// Helper: Escape HTML to prevent XSS in innerHTML injections
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
 // Helper: Format transcript with AI/User colors
 function formatTranscriptHTML(rawTranscript) {
     if (!rawTranscript || rawTranscript.trim().length === 0) return '';
     const lines = rawTranscript.split('\n').filter(l => l.trim());
     return lines.map(line => {
         const trimmed = line.trim();
+        const escaped = escapeHtml(trimmed);
         if (trimmed.startsWith('AI:') || trimmed.startsWith('Assistant:') || trimmed.startsWith('Bot:')) {
-            return `<div style="margin: 4px 0; padding: 6px 10px; border-left: 3px solid var(--accent); background: rgba(99,102,241,0.06); border-radius: 0 6px 6px 0;"><span style="color: var(--accent); font-weight: 600; font-size: 11px;">🤖 IA</span> <span style="color: var(--text-primary);">${trimmed.replace(/^(AI:|Assistant:|Bot:)\s*/, '')}</span></div>`;
+            return `<div style="margin: 4px 0; padding: 6px 10px; border-left: 3px solid var(--accent); background: rgba(99,102,241,0.06); border-radius: 0 6px 6px 0;"><span style="color: var(--accent); font-weight: 600; font-size: 11px;">🤖 IA</span> <span style="color: var(--text-primary);">${escapeHtml(trimmed.replace(/^(AI:|Assistant:|Bot:)\s*/, ''))}</span></div>`;
         } else if (trimmed.startsWith('User:') || trimmed.startsWith('Customer:') || trimmed.startsWith('Cliente:')) {
-            return `<div style="margin: 4px 0; padding: 6px 10px; border-left: 3px solid var(--success); background: rgba(16,185,129,0.06); border-radius: 0 6px 6px 0;"><span style="color: var(--success); font-weight: 600; font-size: 11px;">👤 Cliente</span> <span style="color: var(--text-primary);">${trimmed.replace(/^(User:|Customer:|Cliente:)\s*/, '')}</span></div>`;
+            return `<div style="margin: 4px 0; padding: 6px 10px; border-left: 3px solid var(--success); background: rgba(16,185,129,0.06); border-radius: 0 6px 6px 0;"><span style="color: var(--success); font-weight: 600; font-size: 11px;">👤 Cliente</span> <span style="color: var(--text-primary);">${escapeHtml(trimmed.replace(/^(User:|Customer:|Cliente:)\s*/, ''))}</span></div>`;
         }
-        return `<div style="margin: 4px 0; padding: 4px 10px; color: var(--text-secondary);">${trimmed}</div>`;
+        return `<div style="margin: 4px 0; padding: 4px 10px; color: var(--text-secondary);">${escaped}</div>`;
     }).join('');
 }
 
@@ -42,7 +197,7 @@ async function populateOriginalLeadData(call) {
 
     // Try to fetch additional data from the Leads table
     try {
-        const LEADS_TABLE_ID = 'mgot1kl4sglenym';
+        const LEADS_TABLE_ID = LEADS_TABLE;
         const phoneCalled = call.phone_called;
         if (phoneCalled) {
             const normalizedSearch = normalizePhone(phoneCalled);
@@ -81,11 +236,13 @@ async function fetchData(tableId, limit = 200) {
             err.type = 'NETWORK_ERROR';
             err.detail = networkErr.message;
             err.url = url;
+            logApiError({ url, method: 'GET', status: 0, statusText: 'NETWORK_ERROR', context: 'fetchData', detail: networkErr.message });
             throw err;
         }
         if (!res.ok) {
             let body = '';
             try { body = await res.text(); } catch (_) { }
+            logApiError({ url, method: 'GET', status: res.status, statusText: res.statusText, context: 'fetchData', detail: body.substring(0, 500) });
             const err = new Error(`El servidor de datos respondió con error HTTP ${res.status} (${res.statusText || 'sin descripción'})`);
             err.type = 'HTTP_ERROR';
             err.status = res.status;
@@ -97,6 +254,7 @@ async function fetchData(tableId, limit = 200) {
         try {
             data = await res.json();
         } catch (parseErr) {
+            logApiError({ url, method: 'GET', status: 200, statusText: 'PARSE_ERROR', context: 'fetchData', detail: parseErr.message });
             const err = new Error('La respuesta del servidor no es JSON válido.');
             err.type = 'PARSE_ERROR';
             err.detail = parseErr.message;
@@ -156,7 +314,7 @@ function formatDuration(seconds) {
 
 // ── Call Quality Score System ──
 function calculateCallScore(call) {
-    const breakdown = { duration: 0, evaluation: 0, confirmed: 0, endReason: 0, transcript: 0 };
+    const breakdown = { duration: 0, evaluation: 0, confirmed: 0, endReason: 0, transcript: 0, appointment: 0 };
 
     // Contestador (answering machine) calls always score 0
     const evalLower = (call.evaluation || '').toLowerCase();
@@ -164,50 +322,61 @@ function calculateCallScore(call) {
         return { total: 0, breakdown };
     }
 
-    // 1. Duration (max 25)
+    // 1. Duration (max 20)
     const dur = parseInt(call.duration_seconds) || 0;
-    if (dur >= 60) breakdown.duration = 25;
-    else if (dur >= 30) breakdown.duration = 18;
-    else if (dur >= 15) breakdown.duration = 10;
-    else if (dur >= 10) breakdown.duration = 5;
+    if (dur >= 60) breakdown.duration = 20;
+    else if (dur >= 30) breakdown.duration = 14;
+    else if (dur >= 15) breakdown.duration = 8;
+    else if (dur >= 10) breakdown.duration = 4;
     else breakdown.duration = 0;
 
-    // 2. Evaluation (max 30)
+    // 2. Evaluation (max 25)
     const evalText = (call.evaluation || '').toLowerCase();
-    if (evalText.includes('confirmada')) breakdown.evaluation = 30;
-    else if (evalText.includes('completada')) breakdown.evaluation = 22;
-    else if (evalText.includes('sin datos') || evalText.includes('incompleta')) breakdown.evaluation = 10;
-    else if (evalText.includes('buzón') || evalText.includes('no contesta')) breakdown.evaluation = 5;
+    if (evalText.includes('confirmada')) breakdown.evaluation = 25;
+    else if (evalText.includes('completada')) breakdown.evaluation = 18;
+    else if (evalText.includes('sin datos') || evalText.includes('incompleta')) breakdown.evaluation = 8;
+    else if (evalText.includes('buzón') || evalText.includes('no contesta')) breakdown.evaluation = 4;
     else if (evalText.includes('error') || evalText.includes('rechazada')) breakdown.evaluation = 0;
-    else breakdown.evaluation = 8; // Pendiente
+    else breakdown.evaluation = 6; // Pendiente
 
-    // 3. Confirmed data (max 20)
+    // 3. Confirmed data (max 15)
     const callId = call.vapi_call_id || '';
     const confData = confirmedDataMap[callId];
     if (confData) {
         let confPoints = 0;
-        if (confData.name && confData.name !== '-') confPoints += 7;
-        if (confData.email && confData.email !== '-') confPoints += 7;
-        if (confData.rawPhone && confData.rawPhone !== '-') confPoints += 6;
+        if (confData.name && confData.name !== '-') confPoints += 5;
+        if (confData.email && confData.email !== '-') confPoints += 5;
+        if (confData.rawPhone && confData.rawPhone !== '-') confPoints += 5;
         breakdown.confirmed = confPoints;
     }
 
-    // 4. End reason (max 15)
+    // 4. End reason (max 10)
     const reason = (call.ended_reason || '').toLowerCase();
-    if (reason.includes('customer-ended') || reason.includes('customer_ended')) breakdown.endReason = 15;
-    else if (reason.includes('assistant-ended') || reason.includes('assistant_ended')) breakdown.endReason = 12;
-    else if (reason.includes('manual') || reason === '') breakdown.endReason = 8;
-    else if (reason.includes('voicemail') || reason.includes('buzón')) breakdown.endReason = 5;
+    if (reason.includes('customer-ended') || reason.includes('customer_ended')) breakdown.endReason = 10;
+    else if (reason.includes('assistant-ended') || reason.includes('assistant_ended')) breakdown.endReason = 8;
+    else if (reason.includes('manual') || reason === '') breakdown.endReason = 5;
+    else if (reason.includes('voicemail') || reason.includes('buzón')) breakdown.endReason = 3;
     else if (reason.includes('error') || reason.includes('fail')) breakdown.endReason = 0;
-    else breakdown.endReason = 7;
+    else breakdown.endReason = 4;
 
-    // 5. Transcript (max 10)
+    // 5. Transcript (max 5)
     const transcript = call.transcript || '';
-    if (transcript.length > 200) breakdown.transcript = 10;
-    else if (transcript.length > 50) breakdown.transcript = 5;
+    if (transcript.length > 200) breakdown.transcript = 5;
+    else if (transcript.length > 50) breakdown.transcript = 3;
     else breakdown.transcript = 0;
 
-    const total = breakdown.duration + breakdown.evaluation + breakdown.confirmed + breakdown.endReason + breakdown.transcript;
+    // 6. Appointment scheduled (max 25)
+    const apptData = confData || confirmedDataMap[callId];
+    if (apptData && apptData.appointmentDate) {
+        const apptDate = new Date(apptData.appointmentDate);
+        if (!isNaN(apptDate.getTime())) {
+            breakdown.appointment = 25; // Valid appointment date
+        } else {
+            breakdown.appointment = 10; // Date exists but invalid
+        }
+    }
+
+    const total = breakdown.duration + breakdown.evaluation + breakdown.confirmed + breakdown.endReason + breakdown.transcript + breakdown.appointment;
     return { total, breakdown };
 }
 
@@ -467,27 +636,292 @@ window._runDiagnostic = async function () {
     }
 };
 
-// Pre-fetch all confirmed data into a map keyed by vapi_call_id
-async function fetchConfirmedData() {
+// Pre-fetch all confirmed data into a map keyed by vapi_call_id (with cache)
+async function fetchConfirmedData(forceRefresh = false) {
+    if (!forceRefresh && _confirmedCache && (Date.now() - _confirmedCacheTime) < DATA_CACHE_TTL) {
+        // Rebuild map from cache
+        _rebuildConfirmedMap(_confirmedCache);
+        return _confirmedCache;
+    }
     try {
-        const res = await fetch(`${API_BASE}/${CONFIRMED_TABLE}/records?limit=200`, {
+        const res = await fetch(`${API_BASE}/${CONFIRMED_TABLE}/records?limit=500&sort=-CreatedAt`, {
             headers: { 'xc-token': XC_TOKEN }
         });
         const data = await res.json();
-        confirmedDataMap = {};
-        (data.list || []).forEach(row => {
-            const callId = row['Vapi Call ID'] || row.vapi_call_id || '';
-            if (callId) {
-                // Store raw phone for later cross-referencing with call log
-                confirmedDataMap[callId] = {
-                    name: sanitizeName(row['Nombre Confirmado'] || row.name || '-'),
-                    rawPhone: row['Teléfono Confirmado'] || row.phone || '-',
-                    email: sanitizeEmail(row['Email Confirmado'] || row.email || '-')
-                };
-            }
-        });
+        const records = data.list || [];
+
+        _rebuildConfirmedMap(records);
+        _confirmedCache = records;
+        _confirmedCacheTime = Date.now();
+        return records;
     } catch (err) {
         console.error('Error fetching confirmed data:', err);
+        return [];
+    }
+}
+
+function _rebuildConfirmedMap(records) {
+    confirmedDataMap = {};
+    records.forEach(row => {
+        const callId = row['Vapi Call ID'] || row.vapi_call_id || '';
+        if (callId) {
+            confirmedDataMap[callId] = {
+                name: sanitizeName(row['Nombre Confirmado'] || row.lead_name || row.name || '-'),
+                rawPhone: row['Teléfono Confirmado'] || row.lead_phone || row.phone || '-',
+                email: sanitizeEmail(row['Email Confirmado'] || row.email || '-'),
+                appointmentDate: row['Fecha Cita'] || row.call_date || row.appointment_date || null,
+                createdAt: row['CreatedAt'] || row.created_at
+            };
+        }
+    });
+}
+
+function getAppointmentStatus(dateStr) {
+    if (!dateStr) return { label: 'Sin fecha', cls: 'past', icon: '❓' };
+    const now = new Date();
+    const apptDate = new Date(dateStr);
+    if (isNaN(apptDate.getTime())) return { label: 'Sin fecha', cls: 'past', icon: '❓' };
+    const madridOpts = { timeZone: 'Europe/Madrid' };
+    const todayStr = now.toLocaleDateString('sv-SE', madridOpts);
+    const apptDayStr = apptDate.toLocaleDateString('sv-SE', madridOpts);
+    if (apptDayStr === todayStr) return { label: 'Hoy', cls: 'today', icon: '📍' };
+    if (apptDate > now) return { label: 'Próxima', cls: 'upcoming', icon: '🟢' };
+    return { label: 'Pasada', cls: 'past', icon: '✅' };
+}
+
+function formatAppointmentDate(dateStr) {
+    if (!dateStr) return 'No definida';
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return 'No definida';
+    const madridOpts = { timeZone: 'Europe/Madrid' };
+    const now = new Date();
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const dayStr = d.toLocaleDateString('sv-SE', madridOpts);
+    const todayStr = now.toLocaleDateString('sv-SE', madridOpts);
+    const tomorrowStr = tomorrow.toLocaleDateString('sv-SE', madridOpts);
+    const timeStr = d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', ...madridOpts });
+    if (dayStr === todayStr) return `Hoy ${timeStr}`;
+    if (dayStr === tomorrowStr) return `Mañana ${timeStr}`;
+    return d.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short', ...madridOpts }) + ' ' + timeStr;
+}
+
+let calendarWeekOffset = 0;
+
+function renderAppointmentCalendar(records) {
+    const grid = document.getElementById('appt-calendar-grid');
+    const titleEl = document.getElementById('appt-cal-title');
+    if (!grid) return;
+
+    const now = new Date();
+    const startOfWeek = new Date(now);
+    startOfWeek.setDate(now.getDate() - now.getDay() + 1 + calendarWeekOffset * 7); // Monday
+    startOfWeek.setHours(0, 0, 0, 0);
+
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(startOfWeek.getDate() + 6);
+    endOfWeek.setHours(23, 59, 59, 999);
+
+    // Title
+    const opts = { day: 'numeric', month: 'short' };
+    const startLabel = startOfWeek.toLocaleDateString('es-ES', opts);
+    const endLabel = endOfWeek.toLocaleDateString('es-ES', opts);
+    if (calendarWeekOffset === 0) {
+        titleEl.textContent = `Esta semana · ${startLabel} — ${endLabel}`;
+    } else if (calendarWeekOffset === 1) {
+        titleEl.textContent = `Próx. semana · ${startLabel} — ${endLabel}`;
+    } else if (calendarWeekOffset === -1) {
+        titleEl.textContent = `Semana pasada · ${startLabel} — ${endLabel}`;
+    } else {
+        titleEl.textContent = `${startLabel} — ${endLabel}`;
+    }
+
+    const dayNames = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+    const madridOpts = { timeZone: 'Europe/Madrid' };
+    const todayStr = now.toLocaleDateString('sv-SE', madridOpts);
+
+    grid.innerHTML = '';
+    for (let i = 0; i < 7; i++) {
+        const day = new Date(startOfWeek);
+        day.setDate(startOfWeek.getDate() + i);
+        const dayStr = day.toLocaleDateString('sv-SE', madridOpts);
+        const isToday = dayStr === todayStr;
+
+        // Find appointments for this day
+        const dayAppts = (records || []).filter(r => {
+            const fd = r['Fecha Cita'] || r.call_date;
+            if (!fd) return false;
+            const apptDate = new Date(fd);
+            if (isNaN(apptDate.getTime())) return false;
+            return apptDate.toLocaleDateString('sv-SE', madridOpts) === dayStr;
+        });
+
+        const col = document.createElement('div');
+        col.className = `appt-day-col${isToday ? ' is-today' : ''}`;
+        col.innerHTML = `
+            <div class="appt-day-label">${dayNames[i]}</div>
+            <div class="appt-day-num">${day.getDate()}</div>
+            <div class="appt-day-dots">
+                ${dayAppts.slice(0, 3).map(a => {
+            const fd = a['Fecha Cita'] || a.call_date;
+            const status = getAppointmentStatus(fd);
+            const name = (a['Nombre Confirmado'] || a.lead_name || '').split(' ')[0] || '—';
+            const time = new Date(fd).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+            return `<div class="appt-day-dot ${status.cls}" title="${a['Nombre Confirmado'] || ''} — ${time}">${time}</div>`;
+        }).join('')}
+                ${dayAppts.length > 3 ? `<div class="appt-day-count">+${dayAppts.length - 3} más</div>` : ''}
+            </div>
+        `;
+        grid.appendChild(col);
+    }
+}
+
+function updateAppointmentKPIs(records) {
+    const now = new Date();
+    const madridOpts = { timeZone: 'Europe/Madrid' };
+    const todayStr = now.toLocaleDateString('sv-SE', madridOpts);
+    let total = records.length;
+    let upcoming = 0, today = 0, past = 0;
+
+    records.forEach(r => {
+        const fd = r['Fecha Cita'] || r.call_date;
+        if (!fd) { past++; return; }
+        const apptDate = new Date(fd);
+        if (isNaN(apptDate.getTime())) { past++; return; }
+        const apptDayStr = apptDate.toLocaleDateString('sv-SE', madridOpts);
+        if (apptDayStr === todayStr) today++;
+        else if (apptDate > now) upcoming++;
+        else past++;
+    });
+
+    const setVal = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+    setVal('appt-kpi-total', total);
+    setVal('appt-kpi-upcoming', upcoming);
+    setVal('appt-kpi-today', today);
+    setVal('appt-kpi-past', past);
+}
+
+function renderAppointments(records) {
+    const tbody = document.getElementById('appointments-table');
+    if (!tbody) return;
+
+    updateAppointmentKPIs(records);
+    renderAppointmentCalendar(records);
+
+    if (!records || records.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No hay citas registradas. ¡Usa ➕ Nueva Cita o espera a que Carolina agende una!</td></tr>';
+        return;
+    }
+
+    // Sort: upcoming first, then today, then past (most recent first within each group)
+    const now = new Date();
+    const sorted = [...records].sort((a, b) => {
+        const dateA = new Date(a['Fecha Cita'] || '1970-01-01');
+        const dateB = new Date(b['Fecha Cita'] || '1970-01-01');
+        const aFuture = dateA >= now ? 1 : 0;
+        const bFuture = dateB >= now ? 1 : 0;
+        if (aFuture !== bFuture) return bFuture - aFuture; // Future first
+        return aFuture ? dateA - dateB : dateB - dateA; // Ascending for future, descending for past
+    });
+
+    tbody.innerHTML = '';
+    sorted.forEach(row => {
+        const tr = document.createElement('tr');
+        const fd = row['Fecha Cita'] || row.call_date;
+        const status = getAppointmentStatus(fd);
+        const callId = row['Vapi Call ID'] || '-';
+        const shortCallId = callId.length > 15 ? callId.substring(0, 8) + '...' : callId;
+        const phone = row['Teléfono Confirmado'] || row.lead_phone || '-';
+        const phoneCleaned = phone.replace(/\D/g, '');
+
+        tr.innerHTML = `
+            <td><span class="appt-status-badge ${status.cls}">${status.icon} ${status.label}</span></td>
+            <td><strong>${formatAppointmentDate(fd)}</strong></td>
+            <td>${escapeHtml(sanitizeName(row['Nombre Confirmado'] || row.lead_name || '-'))}</td>
+            <td class="phone">${phone !== '-' ? `<button class="appt-phone-btn" onclick="window.open('tel:${escapeHtml(phoneCleaned)}')">📞 ${escapeHtml(phone)}</button>` : '-'}</td>
+            <td>${escapeHtml(row['Email Confirmado'] || '-')}</td>
+            <td><code title="${escapeHtml(callId)}">${escapeHtml(shortCallId)}</code></td>
+            <td>
+                <button class="action-btn" onclick="window._viewAppointmentCall('${escapeHtml(callId)}')">👁 Ver</button>
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+// Global helper for appointment actions
+window._viewAppointmentCall = (vapiCallId) => {
+    const call = allCalls.find(c => c.vapi_call_id === vapiCallId);
+    if (call) {
+        openDetailDirect(call);
+    } else {
+        alert('Llamada original no encontrada en el historial reciente.');
+    }
+};
+
+async function loadAppointments() {
+    const tbody = document.getElementById('appointments-table');
+    if (tbody) tbody.innerHTML = '<tr><td colspan="7" class="loading">Cargando citas...</td></tr>';
+
+    const records = await fetchConfirmedData();
+    renderAppointments(records);
+}
+
+// Manual appointment creation
+async function saveManualAppointment() {
+    const datetime = document.getElementById('new-appt-datetime')?.value;
+    const name = document.getElementById('new-appt-name')?.value?.trim();
+    const phone = document.getElementById('new-appt-phone')?.value?.trim();
+    const email = document.getElementById('new-appt-email')?.value?.trim();
+    const feedback = document.getElementById('new-appt-feedback');
+    const btn = document.getElementById('save-new-appointment-btn');
+
+    if (!datetime || !name || !phone) {
+        if (feedback) { feedback.style.color = 'var(--danger)'; feedback.textContent = '⚠️ Rellena fecha, nombre y teléfono.'; }
+        return;
+    }
+
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Guardando...'; }
+    if (feedback) { feedback.style.color = 'var(--accent)'; feedback.textContent = 'Guardando en NocoDB...'; }
+
+    try {
+        const isoDate = new Date(datetime).toISOString();
+        const res = await fetch(`${API_BASE}/${CONFIRMED_TABLE}/records`, {
+            method: 'POST',
+            headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                'Nombre Confirmado': name,
+                'Teléfono Confirmado': phone,
+                'Email Confirmado': email || '',
+                'Fecha Cita': isoDate,
+                'call_date': isoDate,
+                'lead_name': name,
+                'lead_phone': phone,
+                'Vapi Call ID': 'manual_' + Date.now()
+            })
+        });
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        if (feedback) { feedback.style.color = 'var(--success)'; feedback.textContent = '✅ ¡Cita creada correctamente!'; }
+
+        // Reset form
+        document.getElementById('new-appt-datetime').value = '';
+        document.getElementById('new-appt-name').value = '';
+        document.getElementById('new-appt-phone').value = '';
+        document.getElementById('new-appt-email').value = '';
+
+        // Close modal after a short delay and refresh
+        setTimeout(() => {
+            document.getElementById('new-appointment-modal').style.display = 'none';
+            if (feedback) feedback.textContent = '';
+            loadAppointments();
+        }, 1200);
+    } catch (err) {
+        console.error('Error saving appointment:', err);
+        if (feedback) { feedback.style.color = 'var(--danger)'; feedback.textContent = `❌ Error: ${err.message}`; }
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '💾 Guardar Cita'; }
     }
 }
 
@@ -529,6 +963,7 @@ async function enrichCallsFromVapi(calls) {
                 headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
             });
             if (!res.ok) {
+                logApiError({ url: `https://api.vapi.ai/call/${call.vapi_call_id}`, method: 'GET', status: res.status, statusText: res.statusText, context: 'enrichCallsFromVapi', detail: `callId=${call.vapi_call_id}` });
                 if (res.status === 429) break; // Stop if rate limited
                 continue;
             }
@@ -872,11 +1307,12 @@ async function openDetailDirect(call) {
             const color = getScoreColor(scoreResult.total);
             const bd = scoreResult.breakdown;
             const dims = [
-                { name: 'Duración', val: bd.duration, max: 25, icon: '⏱️' },
-                { name: 'Evaluación', val: bd.evaluation, max: 30, icon: '📊' },
-                { name: 'Datos Confirmados', val: bd.confirmed, max: 20, icon: '✅' },
-                { name: 'Motivo Fin', val: bd.endReason, max: 15, icon: '🔚' },
-                { name: 'Transcripción', val: bd.transcript, max: 10, icon: '📝' }
+                { name: 'Duración', val: bd.duration, max: 20, icon: '⏱️' },
+                { name: 'Evaluación', val: bd.evaluation, max: 25, icon: '📊' },
+                { name: 'Datos Confirmados', val: bd.confirmed, max: 15, icon: '✅' },
+                { name: 'Motivo Fin', val: bd.endReason, max: 10, icon: '🔚' },
+                { name: 'Transcripción', val: bd.transcript, max: 5, icon: '📝' },
+                { name: 'Agendamiento', val: bd.appointment, max: 25, icon: '🗓️' }
             ];
             scoreSec.style.display = 'block';
             scoreSec.innerHTML = `
@@ -1010,11 +1446,12 @@ async function openDetail(index) {
         const color = getScoreColor(scoreResult.total);
         const bd = scoreResult.breakdown;
         const dims = [
-            { name: 'Duración', val: bd.duration, max: 25, icon: '⏱️' },
-            { name: 'Evaluación', val: bd.evaluation, max: 30, icon: '📊' },
-            { name: 'Datos Confirmados', val: bd.confirmed, max: 20, icon: '✅' },
-            { name: 'Motivo Fin', val: bd.endReason, max: 15, icon: '🔚' },
-            { name: 'Transcripción', val: bd.transcript, max: 10, icon: '📝' }
+            { name: 'Duración', val: bd.duration, max: 20, icon: '⏱️' },
+            { name: 'Evaluación', val: bd.evaluation, max: 25, icon: '📊' },
+            { name: 'Datos Confirmados', val: bd.confirmed, max: 15, icon: '✅' },
+            { name: 'Motivo Fin', val: bd.endReason, max: 10, icon: '🔚' },
+            { name: 'Transcripción', val: bd.transcript, max: 5, icon: '📝' },
+            { name: 'Agendamiento', val: bd.appointment, max: 25, icon: '🗓️' }
         ];
         scoreSec.style.display = 'block';
         scoreSec.innerHTML = `
@@ -1141,7 +1578,8 @@ function closeModal() {
 }
 
 async function syncCallStatus(vapiCallId, recordId) {
-    if (!vapiCallId || vapiCallId === '-' || vapiCallId.startsWith('39')) return; // Ignore invalid or manual IDs
+    // Only process valid Vapi UUIDs (they look like '019...' hex UUIDs, 36+ chars)
+    if (!vapiCallId || vapiCallId === '-' || vapiCallId === 'unknown' || vapiCallId.length < 36 || vapiCallId.startsWith('39')) return;
 
     try {
         const res = await fetch(`https://api.vapi.ai/call/${vapiCallId}`, {
@@ -1182,10 +1620,11 @@ async function syncCallStatus(vapiCallId, recordId) {
 
 async function syncPendingCalls() {
     const pending = allCalls.filter(c =>
-        !c.ended_reason ||
-        c.ended_reason === 'Call Initiated' ||
-        c.ended_reason.toLowerCase().includes('in progress')
-    );
+        c.vapi_call_id && c.vapi_call_id.length >= 36 && c.vapi_call_id !== 'unknown' &&
+        (!c.ended_reason ||
+            c.ended_reason === 'Call Initiated' ||
+            c.ended_reason.toLowerCase().includes('in progress'))
+    ).slice(0, 10); // Limit to 10 per cycle to avoid API rate limits
 
     if (pending.length === 0) return;
 
@@ -1195,10 +1634,12 @@ async function syncPendingCalls() {
     for (const call of pending) {
         const success = await syncCallStatus(call.vapi_call_id, call.id || call.Id);
         if (success) updatedAny = true;
+        // Delay between calls to avoid 429 rate limiting
+        await new Promise(r => setTimeout(r, 300));
     }
 
     if (updatedAny) {
-        // Refresh local data silenty
+        // Refresh local data silently
         const updatedCalls = await fetchData(CALL_LOGS_TABLE);
         allCalls = updatedCalls;
         applyFilters();
@@ -1210,7 +1651,7 @@ async function syncPendingCalls() {
 // --- Planning / Scheduled Calls Section ---
 async function fetchScheduledLeads() {
     try {
-        const LEADS_TABLE = 'mgot1kl4sglenym'; // From bulk_call_manager.json
+
         // Paginate to fetch ALL leads (supports 200+ scheduled leads)
         let allRecords = [];
         let offset = 0;
@@ -1355,59 +1796,241 @@ async function fetchScheduledLeads() {
     }
 }
 
+// --- Scheduled Calls in Scheduler Tab ---
+async function renderScheduledCallsInScheduler() {
+    const container = document.getElementById('sched-scheduled-calls');
+    const list = document.getElementById('sched-scheduled-list');
+    const stats = document.getElementById('sched-scheduled-stats');
+    if (!container || !list) return;
+
+    try {
+        // Use cached leads data
+        const allRecords = await fetchCachedLeads();
+        console.log('[RenderScheduled] Total records from cache:', allRecords.length);
+
+        const leads = allRecords.filter(lead => lead.fecha_planificada);
+        console.log('[RenderScheduled] Leads with fecha_planificada:', leads.length, leads.map(l => ({ name: l.name, phone: l.phone, fecha_planificada: l.fecha_planificada, status: l.status })));
+
+        if (leads.length === 0) {
+            console.log('[RenderScheduled] No scheduled leads found, hiding container');
+            container.style.display = 'none';
+            return;
+        }
+
+        container.style.display = 'block';
+        list.innerHTML = '';
+
+        const now = new Date();
+        const sorted = leads.sort((a, b) => utcStringToLocalDate(a.fecha_planificada) - utcStringToLocalDate(b.fecha_planificada));
+        const dueCount = sorted.filter(l => utcStringToLocalDate(l.fecha_planificada) <= now).length;
+        const futureCount = sorted.length - dueCount;
+
+        stats.innerHTML = `
+            <span>📞 ${sorted.length} total</span>
+            <span style="color: #fbbf24;">⚡ ${dueCount} vencidas</span>
+            <span style="color: #4ade80;">📅 ${futureCount} pendientes</span>
+            <button onclick="cancelAllScheduledCalls()" 
+                style="background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.25); 
+                padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; white-space: nowrap; margin-left: 8px;">
+                🗑️ Cancelar Todas
+            </button>
+        `;
+
+        sorted.forEach((lead, idx) => {
+            const plannedDate = utcStringToLocalDate(lead.fecha_planificada);
+            const isDue = plannedDate <= now;
+            const timeStr = isNaN(plannedDate) ? '?' : plannedDate.toLocaleString('es-ES', { hour: '2-digit', minute: '2-digit' });
+            const dateStr = isNaN(plannedDate) ? '' : plannedDate.toLocaleString('es-ES', { day: '2-digit', month: '2-digit' });
+
+            const row = document.createElement('div');
+            row.style.cssText = `
+                display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+                background: ${isDue ? 'rgba(251, 191, 36, 0.08)' : 'rgba(255,255,255,0.03)'};
+                border-radius: 8px; margin-bottom: 4px; font-size: 13px;
+                border-left: 3px solid ${isDue ? '#fbbf24' : 'var(--accent)'};
+            `;
+            row.innerHTML = `
+                <span style="color: var(--text-secondary); min-width: 24px;">${idx + 1}</span>
+                <span style="min-width: 110px; font-weight: 500;">${isDue ? '⚡' : '📅'} ${dateStr} ${timeStr}</span>
+                <span style="flex: 1; font-weight: 600;">${lead.name || 'Sin nombre'}</span>
+                <span style="color: var(--text-secondary); min-width: 120px;">${lead.phone || '-'}</span>
+                <span class="planned-row-timer" data-scheduled="${lead.fecha_planificada}" style="min-width: 70px; font-family: monospace; font-size: 12px; color: ${isDue ? '#fbbf24' : '#4ade80'};">--:--</span>
+                <button onclick="cancelScheduledCall(${lead.Id || lead.id})" 
+                    style="background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.25); 
+                    padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 11px; white-space: nowrap;">
+                    ❌ Cancelar
+                </button>
+            `;
+            list.appendChild(row);
+        });
+    } catch (err) {
+        console.error('Error rendering scheduled calls in scheduler:', err);
+    }
+}
+
+async function cancelScheduledCall(recordId) {
+    if (!confirm('¿Cancelar esta llamada programada?')) return;
+    try {
+        const res = await fetch(`${API_BASE}/${LEADS_TABLE}/records`, {
+            method: 'PATCH',
+            headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+            body: JSON.stringify([{ Id: recordId, fecha_planificada: null, status: 'Nuevo' }])
+        });
+        if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
+        invalidateLeadsCache();
+        renderScheduledCallsInScheduler();
+        fetchScheduledLeads();
+    } catch (err) {
+        console.error('Error cancelling scheduled call:', err);
+        alert('Error al cancelar la llamada programada');
+    }
+}
+window.cancelScheduledCall = cancelScheduledCall;
+
+async function cancelAllScheduledCalls() {
+    if (!confirm('⚠️ ¿Cancelar TODAS las llamadas programadas?')) return;
+
+    const btn = document.querySelector('[onclick="cancelAllScheduledCalls()"]');
+    const originalText = btn ? btn.textContent : '';
+
+    try {
+        // Force-refresh to get latest data
+        const allRecords = await fetchCachedLeads(true);
+        const scheduled = allRecords.filter(l => l.fecha_planificada);
+        if (scheduled.length === 0) {
+            alert('No hay llamadas programadas para cancelar.');
+            return;
+        }
+
+        if (btn) btn.textContent = `⏳ Cancelando 0/${scheduled.length}...`;
+
+        let success = 0;
+        let errors = 0;
+        const BATCH_SIZE = 10;
+
+        // Filter out leads without a valid record Id
+        const validScheduled = scheduled.filter(l => l.Id || l.id);
+        if (validScheduled.length === 0) {
+            alert('No hay llamadas programadas con ID válido para cancelar.');
+            return;
+        }
+
+        for (let i = 0; i < validScheduled.length; i += BATCH_SIZE) {
+            const batch = validScheduled.slice(i, i + BATCH_SIZE).map(l => ({
+                Id: l.Id || l.id,
+                fecha_planificada: null,
+                status: 'Nuevo'
+            }));
+
+            try {
+                const res = await fetch(`${API_BASE}/${LEADS_TABLE}/records`, {
+                    method: 'PATCH',
+                    headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+                    body: JSON.stringify(batch)
+                });
+                if (res.ok) {
+                    success += batch.length;
+                } else {
+                    const errText = await res.text();
+                    console.error(`[CancelAll] Batch error:`, res.status, errText);
+                    errors += batch.length;
+                }
+            } catch (e) {
+                console.error(`[CancelAll] Batch exception:`, e);
+                errors += batch.length;
+            }
+
+            if (btn) btn.textContent = `⏳ Cancelando ${Math.min(i + BATCH_SIZE, validScheduled.length)}/${validScheduled.length}...`;
+
+            // Small delay between batches to avoid rate-limiting
+            if (i + BATCH_SIZE < validScheduled.length) {
+                await new Promise(r => setTimeout(r, 200));
+            }
+        }
+
+        alert(`✅ ${success} llamadas canceladas.${errors > 0 ? ` (${errors} errores)` : ''}`);
+        invalidateLeadsCache();
+        renderScheduledCallsInScheduler();
+        fetchSchedulerKPIs();
+        if (typeof fetchScheduledLeads === 'function') fetchScheduledLeads();
+    } catch (err) {
+        console.error('Error cancelling all scheduled calls:', err);
+        alert('Error al cancelar las llamadas: ' + err.message);
+    } finally {
+        if (btn) btn.textContent = originalText || '🗑️ Cancelar Todas';
+    }
+}
+window.cancelAllScheduledCalls = cancelAllScheduledCalls;
+
 // --- Tab Navigation ---
-function initTabs() {
+function switchToTab(target) {
     const tabs = document.querySelectorAll('.nav-tab');
     const views = document.querySelectorAll('.view-content');
+
+    // Update tabs
+    tabs.forEach(t => t.classList.remove('active'));
+    const activeTab = document.querySelector(`.nav-tab[data-tab="${target}"]`);
+    if (activeTab) activeTab.classList.add('active');
+
+    // Update views
+    views.forEach(v => {
+        v.classList.remove('active');
+        if (v.id === `view-${target}`) {
+            v.classList.add('active');
+        }
+    });
+
+    // Tab-specific side effects — lazy load only what this tab needs
+    try {
+        if (target === 'dashboard') loadData();
+        if (target === 'leads') loadLeadsManager();
+        if (target === 'appointments') loadAppointments();
+        if (target === 'scheduler') { initSchedulerDefaults(); renderScheduledCallsInScheduler(); }
+        if (target === 'reports') loadReports();
+        if (target === 'agents') loadAgentPrompt();
+        if (target === 'test') loadData();
+        if (target === 'errorlogs') loadErrorLogs();
+    } catch (e) {
+        console.warn('[switchToTab] Deferred init, some handlers not ready yet:', e.message);
+    }
+
+    // Realtime polling — separate try-catch to avoid TDZ error with let variables
+    try {
+        if (target === 'realtime') { startRealtimePolling(); } else { stopRealtimePolling(); }
+    } catch (e) {
+        // Expected on first load before realtime variables are initialized
+    }
+}
+
+function initTabs() {
+    const tabs = document.querySelectorAll('.nav-tab');
 
     tabs.forEach(tab => {
         tab.addEventListener('click', () => {
             const target = tab.getAttribute('data-tab');
-
-            // Update tabs
-            tabs.forEach(t => t.classList.remove('active'));
-            tab.classList.add('active');
-
-            // Update views
-            views.forEach(v => {
-                v.classList.remove('active');
-                if (v.id === `view-${target}`) {
-                    v.classList.add('active');
-                }
-            });
-
-            // If switching to leads, load them
-            if (target === 'leads') {
-                loadLeadsManager();
-            }
-            // If switching to scheduler, initialize defaults
-            if (target === 'scheduler') {
-                initSchedulerDefaults();
-            }
-            // If switching to realtime, start polling
-            if (target === 'realtime') {
-                startRealtimePolling();
-            } else {
-                stopRealtimePolling();
-            }
-            // If switching to reports, load them
-            if (target === 'reports') {
-                loadReports();
-            }
-            // If switching to agents, load prompt
-            if (target === 'agents') {
-                loadAgentPrompt();
-            }
-            // If switching to changelog, render it
-            if (target === 'changelog') {
-                renderChangelog();
-            }
+            // Update URL hash (without triggering hashchange handler redundantly)
+            history.replaceState(null, '', `#${target}`);
+            switchToTab(target);
         });
     });
+
+    // Listen for browser back/forward navigation
+    window.addEventListener('hashchange', () => {
+        const hash = location.hash.replace('#', '');
+        if (hash) {
+            switchToTab(hash);
+        }
+    });
+
+    // On initial load, activate the tab from the URL hash (if present)
+    const initialHash = location.hash.replace('#', '');
+    if (initialHash) {
+        switchToTab(initialHash);
+    }
 }
 
 // ── Bulk Scheduler Logic ──
-const LEADS_TABLE = 'mgot1kl4sglenym';
+
 let schedulerLeads = []; // leads fetched for preview
 
 function initSchedulerDefaults() {
@@ -1478,21 +2101,7 @@ function updateDurationEstimate() {
 
 async function fetchSchedulerKPIs() {
     try {
-        let allRecords = [];
-        let offset = 0;
-        const batchSize = 200;
-
-        while (true) {
-            const res = await fetch(`${API_BASE}/${LEADS_TABLE}/records?limit=${batchSize}&offset=${offset}`, {
-                headers: { 'xc-token': XC_TOKEN }
-            });
-            const data = await res.json();
-            const records = data.list || [];
-            allRecords = allRecords.concat(records);
-            if (records.length < batchSize || data.pageInfo?.isLastPage !== false) break;
-            offset += batchSize;
-            if (allRecords.length >= 5000) break;
-        }
+        const allRecords = await fetchCachedLeads();
 
         const total = allRecords.length;
         const calledStatuses = ['completado', 'contestador', 'voicemail', 'no contesta', 'fallido', 'interesado', 'reintentar'];
@@ -1502,14 +2111,22 @@ async function fetchSchedulerKPIs() {
             return calledStatuses.some(cs => s.includes(cs));
         }).length;
 
-        // Eligible = has phone, not scheduled, not called (if skip enabled)
-        const eligible = allRecords.filter(l => {
+        // Eligible = has phone, not scheduled, not called (if skip enabled), deduplicated by phone
+        const eligibleLeads = allRecords.filter(l => {
             const phone = String(l.phone || '').trim();
             if (!phone || phone === '0' || phone === 'null' || phone.length < 6) return false;
             const status = (l.status || '').toLowerCase();
             if (status === 'programado' || status === 'en proceso' || status === 'llamando...') return false;
             if (l.fecha_planificada) return false;
             if (calledStatuses.some(s => status.includes(s))) return false;
+            return true;
+        });
+        // Deduplicate by phone
+        const seenPhones = new Set();
+        const eligible = eligibleLeads.filter(l => {
+            const normPhone = String(l.phone || '').replace(/\D/g, '');
+            if (seenPhones.has(normPhone)) return false;
+            seenPhones.add(normPhone);
             return true;
         }).length;
 
@@ -1549,32 +2166,11 @@ async function fetchSchedulerKPIs() {
 
 
 async function fetchEligibleLeads(count, source) {
-    // Fetch all leads, then filter client-side for eligible ones
-    let allRecords = [];
-    let offset = 0;
-    const batchSize = 200;
+    // Use centralized cache to get all leads
+    const allRecords = [...(await fetchCachedLeads())];
 
     // Check if we should skip already-called leads
     const skipCalled = document.getElementById('sched-skip-called')?.checked ?? true;
-
-    // Determine sort order for the API
-    const sortField = 'CreatedAt';
-    const sortDir = source === 'oldest' ? 'asc' : 'desc';
-
-    while (true) {
-        const url = `${API_BASE}/${LEADS_TABLE}/records?limit=${batchSize}&offset=${offset}&sort=-${sortField}`;
-        const res = await fetch(url, {
-            headers: { 'xc-token': XC_TOKEN }
-        });
-        const data = await res.json();
-        const records = data.list || [];
-        allRecords = allRecords.concat(records);
-
-        if (records.length < batchSize || data.pageInfo?.isLastPage !== false) break;
-        offset += batchSize;
-        // Safety limit
-        if (allRecords.length >= 2000) break;
-    }
 
     // Sort
     if (source === 'oldest') {
@@ -1586,36 +2182,45 @@ async function fetchEligibleLeads(count, source) {
     // Statuses that indicate the lead has already been called
     const calledStatuses = ['completado', 'contestador', 'voicemail', 'no contesta', 'fallido', 'interesado', 'reintentar'];
 
-    // Filter: eligible leads
+    // Filter: eligible leads — with debug breakdown
+    let dbgNoPhone = 0, dbgBadStatus = 0, dbgPlanned = 0, dbgCalled = 0;
     const eligible = allRecords.filter(lead => {
         const phone = String(lead.phone || '').trim();
-        // Must have a valid phone
-        if (!phone || phone === '0' || phone === 'null' || phone.length < 6) return false;
-        // Must not already be scheduled or in process
+        if (!phone || phone === '0' || phone === 'null' || phone.length < 6) { dbgNoPhone++; return false; }
         const status = (lead.status || '').toLowerCase();
-        if (status === 'programado' || status === 'en proceso' || status === 'llamando...') return false;
-        // Must not have a pending fecha_planificada
-        if (lead.fecha_planificada) return false;
-        // If "skip called" is enabled, exclude leads with any call-related status
-        if (skipCalled && status && calledStatuses.some(s => status.includes(s))) return false;
+        if (status === 'programado' || status === 'en proceso' || status === 'llamando...') { dbgBadStatus++; return false; }
+        if (lead.fecha_planificada) { dbgPlanned++; return false; }
+        if (skipCalled && status && calledStatuses.some(s => status.includes(s))) { dbgCalled++; return false; }
+        return true;
+    });
+    console.log(`[Scheduler][DEBUG] Rejection breakdown: noPhone=${dbgNoPhone}, activeStatus=${dbgBadStatus}, hasPlanned=${dbgPlanned}, alreadyCalled=${dbgCalled}`);
+    // Log sample of first 5 records to inspect their fields
+    console.log('[Scheduler][DEBUG] Sample records:', allRecords.slice(0, 5).map(l => ({ phone: l.phone, status: l.status, fecha_planificada: l.fecha_planificada, name: l.name })));
+
+    // Deduplicate by phone number — keep only the first lead per phone
+    const seenPhones = new Set();
+    const deduplicated = eligible.filter(lead => {
+        const normPhone = String(lead.phone || '').replace(/\D/g, '');
+        if (seenPhones.has(normPhone)) return false;
+        seenPhones.add(normPhone);
         return true;
     });
 
-    console.log(`[Scheduler] skipCalled=${skipCalled}, total=${allRecords.length}, eligible=${eligible.length}`);
-    return eligible.slice(0, count);
+    // Strictly enforce the requested count limit
+    const result = deduplicated.slice(0, count);
+    console.log(`[Scheduler] skipCalled=${skipCalled}, total=${allRecords.length}, eligible=${eligible.length}, deduplicated=${deduplicated.length}, requested=${count}, returning=${result.length}`);
+    return result;
 }
 
 function renderSchedulePreview(leads, startTime, spacingMinutes) {
     const summaryEl = document.getElementById('sched-summary');
     const statsEl = document.getElementById('sched-summary-stats');
     const timelineEl = document.getElementById('sched-timeline');
-    const executeBtn = document.getElementById('sched-execute-btn');
 
     if (leads.length === 0) {
         summaryEl.style.display = 'block';
         statsEl.innerHTML = '';
         timelineEl.innerHTML = '<div style="text-align: center; padding: 40px; color: var(--text-secondary);">⚠️ No se encontraron leads elegibles con los criterios seleccionados</div>';
-        executeBtn.disabled = true;
         return;
     }
 
@@ -1642,8 +2247,8 @@ function renderSchedulePreview(leads, startTime, spacingMinutes) {
             <div class="timeline-item" id="sched-item-${i}">
                 <div class="timeline-index">${i + 1}</div>
                 <div class="timeline-info">
-                    <div class="timeline-name">${lead.name || 'Sin nombre'}</div>
-                    <div class="timeline-phone">📞 ${lead.phone}</div>
+                    <div class="timeline-name">${escapeHtml(lead.name || 'Sin nombre')}</div>
+                    <div class="timeline-phone">📞 ${escapeHtml(lead.phone)}</div>
                 </div>
                 <div class="timeline-time">
                     ${timeStr}
@@ -1655,7 +2260,6 @@ function renderSchedulePreview(leads, startTime, spacingMinutes) {
 
     timelineEl.innerHTML = html;
     summaryEl.style.display = 'block';
-    executeBtn.disabled = false;
 }
 
 async function executeScheduling(leads, startTime, spacingMinutes, assistantId) {
@@ -1676,7 +2280,7 @@ async function executeScheduling(leads, startTime, spacingMinutes, assistantId) 
 
     for (let i = 0; i < leads.length; i++) {
         const lead = leads[i];
-        const leadId = lead.unique_id || lead.Id || lead.id;
+        const leadId = lead.Id || lead.id;
         const callTime = new Date(startTime.getTime() + i * spacingMinutes * 60000);
         const utcTime = localDatetimeToUTC(callTime.getFullYear() + '-' +
             String(callTime.getMonth() + 1).padStart(2, '0') + '-' +
@@ -1694,7 +2298,7 @@ async function executeScheduling(leads, startTime, spacingMinutes, assistantId) 
 
         try {
             const patchData = {
-                unique_id: leadId,
+                Id: leadId,
                 status: 'Programado',
                 fecha_planificada: utcTime
             };
@@ -1706,7 +2310,10 @@ async function executeScheduling(leads, startTime, spacingMinutes, assistantId) 
                 body: JSON.stringify([patchData])
             });
 
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            if (!res.ok) {
+                logApiError({ url: `${API_BASE}/${LEADS_TABLE}/records`, method: 'PATCH', status: res.status, statusText: res.statusText, context: `executeScheduling lead=${lead.name || lead.phone}`, detail: await res.text().catch(() => '') });
+                throw new Error(`HTTP ${res.status}`);
+            }
 
             success++;
             const timelineItem = document.getElementById(`sched-item-${i}`);
@@ -1714,9 +2321,10 @@ async function executeScheduling(leads, startTime, spacingMinutes, assistantId) 
                 timelineItem.classList.add('done');
                 timelineItem.querySelector('.timeline-index').textContent = '✓';
             }
-            progressLog.innerHTML += `<div style="color: var(--success);">✓ ${lead.name || lead.phone} → ${callTime.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</div>`;
+            progressLog.innerHTML += `<div style="color: var(--success);">✓ ${escapeHtml(lead.name || lead.phone)} → ${callTime.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</div>`;
         } catch (err) {
             errors++;
+            logApiError({ url: `${API_BASE}/${LEADS_TABLE}/records`, method: 'PATCH', status: 0, statusText: err.message, context: `executeScheduling lead=${lead.name || lead.phone}`, detail: err.stack || '' });
             const timelineItem = document.getElementById(`sched-item-${i}`);
             if (timelineItem) timelineItem.classList.add('error-item');
             progressLog.innerHTML += `<div style="color: var(--danger);">✗ ${lead.name || lead.phone}: ${err.message}</div>`;
@@ -1735,11 +2343,103 @@ async function executeScheduling(leads, startTime, spacingMinutes, assistantId) 
     progressText.innerHTML = `<span style="color: var(--success); font-weight: 600;">✅ Completado: ${success} programados</span>${errors > 0 ? ` <span style="color: var(--danger);">(${errors} errores)</span>` : ''}`;
     executeBtn.disabled = false;
     previewBtn.disabled = false;
-    executeBtn.textContent = '✅ Hecho — Programar más';
+    executeBtn.textContent = '🚀 Programar Llamadas';
+
+    // Reset leads list to prevent stale data reuse
+    schedulerLeads = [];
+
+    // Refresh: invalidate cache and reload scheduled calls view + KPIs
+    invalidateLeadsCache();
+    renderScheduledCallsInScheduler();
+    fetchSchedulerKPIs();
 }
 
 // Event listener for spacing input to update estimate
 document.getElementById('sched-spacing')?.addEventListener('input', updateDurationEstimate);
+
+// --- Test Lead Modal Logic ---
+document.getElementById('sched-test-lead-btn')?.addEventListener('click', () => {
+    document.getElementById('test-lead-modal').classList.add('active');
+    document.getElementById('test-lead-name').value = '';
+    document.getElementById('test-lead-phone').value = '';
+    document.getElementById('test-lead-feedback').innerHTML = '';
+});
+
+document.getElementById('close-test-lead-modal')?.addEventListener('click', () => {
+    document.getElementById('test-lead-modal').classList.remove('active');
+});
+
+document.getElementById('save-test-lead-btn')?.addEventListener('click', async () => {
+    const name = document.getElementById('test-lead-name').value.trim();
+    const phone = document.getElementById('test-lead-phone').value.trim();
+    const feedback = document.getElementById('test-lead-feedback');
+
+    if (!phone) {
+        feedback.innerHTML = '<span style="color: var(--danger);">El teléfono es obligatorio</span>';
+        return;
+    }
+
+    const saveBtn = document.getElementById('save-test-lead-btn');
+    saveBtn.disabled = true;
+    saveBtn.textContent = '⏳ Guardando y programando...';
+
+    try {
+        // Schedule NOW so the test lead goes to position 1 in the queue
+        const now = new Date();
+        const nowUtc = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')} ${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}:00`;
+        const assistantId = document.getElementById('sched-assistant')?.value || '';
+
+        const leadData = {
+            name: name || 'Test Lead ' + new Date().toLocaleTimeString(),
+            phone: phone,
+            status: 'Programado',
+            fecha_planificada: nowUtc,
+            unique_id: 'test_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5)
+        };
+        if (assistantId) leadData.assistant_id = assistantId;
+
+        console.log('[TestLead] Sending POST with data:', JSON.stringify(leadData));
+        console.log('[TestLead] URL:', `${API_BASE}/${LEADS_TABLE}/records`);
+
+        const res = await fetch(`${API_BASE}/${LEADS_TABLE}/records`, {
+            method: 'POST',
+            headers: {
+                'xc-token': XC_TOKEN,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify([leadData])
+        });
+
+        const responseData = await res.json();
+        console.log('[TestLead] POST response status:', res.status, 'data:', JSON.stringify(responseData));
+
+        if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
+
+        feedback.innerHTML = '<span style="color: var(--success);">✅ Lead creado. Actualizando cola...</span>';
+
+        // Wait for NocoDB to persist the record before re-fetching
+        console.log('[TestLead] Waiting 1.5s for NocoDB to persist...');
+        await new Promise(r => setTimeout(r, 1500));
+        invalidateLeadsCache();
+        console.log('[TestLead] Cache invalidated, calling renderScheduledCallsInScheduler...');
+        await renderScheduledCallsInScheduler();
+        console.log('[TestLead] renderScheduledCallsInScheduler completed');
+        fetchSchedulerKPIs();
+
+        feedback.innerHTML = '<span style="color: var(--success);">✅ Lead programado en 1ª posición de la cola.</span>';
+
+        setTimeout(() => {
+            document.getElementById('test-lead-modal').classList.remove('active');
+        }, 2000);
+
+    } catch (err) {
+        console.error('Error saving test lead:', err);
+        feedback.innerHTML = `<span style="color: var(--danger);">Error: ${err.message}</span>`;
+    } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = '💾 Guardar y Añadir a Base de Datos';
+    }
+});
 
 // Event Listeners for Scheduler
 document.getElementById('sched-preview-btn').addEventListener('click', async () => {
@@ -1773,23 +2473,52 @@ document.getElementById('sched-preview-btn').addEventListener('click', async () 
 });
 
 document.getElementById('sched-execute-btn').addEventListener('click', async () => {
-    console.log('[Scheduler] Execute clicked, leads:', schedulerLeads.length);
-    if (schedulerLeads.length === 0) {
-        alert('No hay leads para programar. Haz click en "Ver Preview" primero.');
+    const executeBtn = document.getElementById('sched-execute-btn');
+    const count = parseInt(document.getElementById('sched-count').value) || 50;
+    const source = document.getElementById('sched-source').value;
+    const startStr = document.getElementById('sched-start').value;
+    const spacing = parseInt(document.getElementById('sched-spacing').value) || 2;
+    const assistantId = document.getElementById('sched-assistant').value;
+
+    if (!startStr) {
+        alert('Por favor, selecciona una fecha y hora de inicio');
         return;
     }
 
-    const startStr = document.getElementById('sched-start').value;
-    const spacing = parseInt(document.getElementById('sched-spacing').value) || 2;
+    // Always re-fetch eligible leads with the CURRENT slider count to prevent stale data
+    executeBtn.textContent = '⏳ Verificando leads...';
+    executeBtn.disabled = true;
+
+    try {
+        console.log('[Scheduler] Execute: re-fetching eligible leads with count:', count);
+        schedulerLeads = await fetchEligibleLeads(count, source);
+        console.log('[Scheduler] Execute: got', schedulerLeads.length, 'leads (requested', count, ')');
+    } catch (err) {
+        console.error('[Scheduler] Error re-fetching leads:', err);
+        alert('Error al verificar leads: ' + err.message);
+        executeBtn.textContent = '🚀 Programar Llamadas';
+        executeBtn.disabled = false;
+        return;
+    }
+
+    if (schedulerLeads.length === 0) {
+        alert('No se encontraron leads elegibles con los criterios actuales.');
+        executeBtn.textContent = '🚀 Programar Llamadas';
+        executeBtn.disabled = false;
+        return;
+    }
+
     const startTime = new Date(startStr);
-    const assistantId = document.getElementById('sched-assistant').value;
 
     console.log('[Scheduler] Config:', { startStr, spacing, startTime, assistantId, leadsCount: schedulerLeads.length });
+
+    executeBtn.textContent = '🚀 Programar Llamadas';
+    executeBtn.disabled = false;
 
     const confirmed = confirm(`¿Programar ${schedulerLeads.length} llamadas empezando a las ${startTime.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}?`);
     if (!confirmed) return;
 
-    document.getElementById('sched-execute-btn').textContent = '⏳ Programando...';
+    executeBtn.textContent = '⏳ Programando...';
     await executeScheduling(schedulerLeads, startTime, spacing, assistantId);
 });
 
@@ -1801,23 +2530,7 @@ async function loadLeadsManager() {
     tbody.innerHTML = '<tr><td colspan="7" class="loading">Cargando lista de leads...</td></tr>';
 
     try {
-        const LEADS_TABLE = 'mgot1kl4sglenym';
-        // Paginate to fetch ALL leads
-        let allRecords = [];
-        let offset = 0;
-        const batchSize = 200;
-
-        while (true) {
-            const res = await fetch(`${API_BASE}/${LEADS_TABLE}/records?limit=${batchSize}&offset=${offset}`, {
-                headers: { 'xc-token': XC_TOKEN }
-            });
-            const data = await res.json();
-            const records = data.list || [];
-            allRecords = allRecords.concat(records);
-            if (records.length < batchSize || data.pageInfo?.isLastPage !== false) break;
-            offset += batchSize;
-            if (allRecords.length >= 5000) break; // Safety limit
-        }
+        const allRecords = await fetchCachedLeads();
 
         allLeads = allRecords;
         renderLeadsTable(allLeads);
@@ -1887,7 +2600,7 @@ function setKPIBar(id, pct) {
 // --- Automation Toggle Logic ---
 async function initAutomationToggle() {
     const toggle = document.getElementById('automation-toggle');
-    const CONFIG_TABLE = 'm4044lwk0p6f721';
+    const CONFIG_TABLE = 'mkntvxkybs6jx8p'; // config table in new NocoDB instance
 
     try {
         const query = '(Key,eq,automation_enabled)';
@@ -1928,11 +2641,84 @@ async function initAutomationToggle() {
 }
 
 // --- Bulk CSV Import ---
+// --- Intelligent Bulk CSV Import ---
+const SYSTEM_FIELDS = [
+    { key: 'name', label: 'Nombre / Empresa', keywords: ['name', 'nombre', 'empresa', 'company', 'lead', 'contacto', 'razon'] },
+    { key: 'phone', label: 'Teléfono', keywords: ['phone', 'telefono', 'movil', 'tel', 'whatsapp', 'mobile', 'celular', 'telefon'] },
+    { key: 'email', label: 'Email', keywords: ['email', 'correo', 'mail', 'e-mail'] },
+    { key: 'sector', label: 'Sector / Actividad', keywords: ['sector', 'actividad', 'industria', 'industry', 'category'] },
+    { key: 'summary', label: 'Resumen / Notas', keywords: ['summary', 'resumen', 'description', 'descripcion', 'notes', 'notas'] },
+    { key: 'address', label: 'Dirección', keywords: ['address', 'direccion', 'calle', 'street', 'city', 'ciudad', 'direccio'] },
+    { key: 'website', label: 'Página Web', keywords: ['website', 'web', 'sitio', 'url', 'pagina'] },
+    { key: 'localidad', label: 'Localidad', keywords: ['localidad', 'municipio', 'poblacion', 'ciudad', 'city', 'localida'] },
+    { key: 'cod_postal', label: 'Código Postal', keywords: ['cod_postal', 'postal', 'cp', 'zip', 'codigo postal', 'cod_pos'] },
+    { key: 'sexo', label: 'Sexo / Género', keywords: ['sexo', 'genero', 'gender'] },
+    { key: 'edad', label: 'Edad', keywords: ['edad', 'age', 'años'] }
+];
+
 function initBulkImport() {
     const importBtn = document.getElementById('btn-import-csv');
     const fileInput = document.getElementById('csv-import');
+    const mappingModal = document.getElementById('csv-mapping-modal');
+    const closeMappingModal = document.getElementById('close-csv-mapping-modal');
+    const cancelImportBtn = document.getElementById('cancel-import-btn');
+    const confirmImportBtn = document.getElementById('confirm-import-btn');
 
-    importBtn.addEventListener('click', () => fileInput.click());
+    let parsedData = [];
+    let headers = [];
+    let currentMapping = {};
+
+    const deleteBtn = document.getElementById('btn-delete-all-leads');
+
+    if (deleteBtn) {
+        deleteBtn.onclick = async () => {
+            if (confirm('⚠️ ¿ESTÁS SEGURO? Esta acción borrará TODOS los leads de la base de datos permanentemente.')) {
+                if (confirm('¿Confirmas que quieres BORRAR TODO? Esta acción no se puede deshacer.')) {
+                    deleteBtn.disabled = true;
+                    deleteBtn.textContent = '⏳ Borrando...';
+
+                    try {
+                        // Fetch all IDs to delete
+                        const response = await fetch(`${API_BASE}/${LEADS_TABLE}/records?limit=1000&fields=Id`, {
+                            headers: { 'xc-token': XC_TOKEN }
+                        });
+                        const data = await response.json();
+                        const ids = data.list.map(l => l.Id || l.id);
+
+                        if (ids.length === 0) {
+                            alert('No hay leads para borrar.');
+                            return;
+                        }
+
+                        // Batch delete (NocoDB v2 supports bulk delete)
+                        for (let i = 0; i < ids.length; i += 50) {
+                            const batch = ids.slice(i, i + 50);
+                            await fetch(`${API_BASE}/${LEADS_TABLE}/records`, {
+                                method: 'DELETE',
+                                headers: {
+                                    'xc-token': XC_TOKEN,
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify(batch.map(id => ({ Id: id })))
+                            });
+                        }
+
+                        alert(`¡Base de Datos limpiada! Se han borrado ${ids.length} leads.`);
+                        invalidateLeadsCache();
+                        loadLeadsManager();
+                    } catch (err) {
+                        console.error('Error in bulk delete:', err);
+                        alert('Error al intentar borrar los leads.');
+                    } finally {
+                        deleteBtn.disabled = false;
+                        deleteBtn.innerHTML = '<span>🗑️</span> Borrar Todo de la BD';
+                    }
+                }
+            }
+        };
+    }
+
+    if (importBtn) importBtn.addEventListener('click', () => fileInput.click());
 
     fileInput.addEventListener('change', (e) => {
         const file = e.target.files[0];
@@ -1941,58 +2727,220 @@ function initBulkImport() {
         Papa.parse(file, {
             header: true,
             skipEmptyLines: true,
-            complete: async (results) => {
-                const leads = results.data.map(row => {
-                    // Use CSV ID if present, otherwise generate one
-                    const uid = row.unique_id || ('lead_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5));
+            complete: (results) => {
+                parsedData = results.data;
+                headers = results.meta.fields;
 
-                    return {
-                        unique_id: uid,
-                        name: row.name || row.Empresa || row.empresa || '',
-                        phone: row.phone || row.Teléfono || row.telefono || '',
-                        email: row.email || row.Email || '',
-                        sector: row.sector || row.Sector || '',
-                        summary: row.summary || '',
-                        address: row.address || '',
-                        website: row.website || '',
-                        url: row.url || '',
-                        status: 'Nuevo'
-                    };
-                }).filter(l => l.phone && l.phone !== '0' && l.phone !== 'N/A');
+                if (headers.length === 0) return alert('El CSV no parece tener cabeceras válidas.');
 
-                if (leads.length === 0) return alert('No se encontraron leads válidos en el CSV (se requiere columna phone/telefono)');
-
-                if (confirm(`¿Importar ${leads.length} leads?`)) {
-                    importBtn.innerText = '⏳ Importando...';
-                    importBtn.disabled = true;
-
-                    try {
-                        const LEADS_TABLE = 'mgot1kl4sglenym';
-                        for (let i = 0; i < leads.length; i += 50) {
-                            const batch = leads.slice(i, i + 50);
-                            await fetch(`${API_BASE}/${LEADS_TABLE}/records`, {
-                                method: 'POST',
-                                headers: {
-                                    'xc-token': XC_TOKEN,
-                                    'Content-Type': 'application/json'
-                                },
-                                body: JSON.stringify(batch)
-                            });
-                        }
-                        alert('¡Importación completada!');
-                        loadLeadsManager();
-                    } catch (err) {
-                        console.error('Error importing leads:', err);
-                        alert('Error durante la importación');
-                    } finally {
-                        importBtn.innerHTML = '📂 Importar CSV';
-                        importBtn.disabled = false;
-                        fileInput.value = '';
-                    }
-                }
+                // Initialize mapping
+                currentMapping = autoDetectMapping(headers);
+                renderMappingUI(headers, parsedData.slice(0, 3), currentMapping);
+                mappingModal.classList.add('active');
             }
         });
     });
+
+    closeMappingModal.onclick = () => {
+        mappingModal.classList.remove('active');
+        fileInput.value = '';
+    };
+
+    cancelImportBtn.onclick = () => {
+        mappingModal.classList.remove('active');
+        fileInput.value = '';
+    };
+
+    confirmImportBtn.onclick = async () => {
+        // Collect final mapping from selects
+        const selects = document.querySelectorAll('.mapping-select');
+        const finalMapping = {};
+        selects.forEach(sel => {
+            const csvHeader = sel.dataset.header;
+            const systemKey = sel.value;
+            if (systemKey && systemKey !== 'skip') {
+                finalMapping[systemKey] = csvHeader;
+            }
+        });
+
+        if (!finalMapping.phone) {
+            return alert('Debes mapear al menos la columna del Teléfono para poder importar.');
+        }
+
+        // 1. Process and Normalize Map Data
+        const normalizedLeadsMap = new Map();
+        parsedData.forEach(row => {
+            const rawPhone = row[finalMapping.phone];
+            if (!rawPhone) return;
+
+            // Normalize phone: keep only digits
+            const phone = rawPhone.toString().replace(/\D/g, '');
+            if (phone.length < 9) return;
+
+            const leadData = {
+                phone: phone,
+                status: 'Nuevo'
+            };
+
+            for (const [sysKey, csvHeader] of Object.entries(finalMapping)) {
+                if (sysKey !== 'phone') {
+                    leadData[sysKey] = row[csvHeader] || '';
+                }
+            }
+
+            // If duplicate phone in same CSV, the last one wins
+            normalizedLeadsMap.set(phone, leadData);
+        });
+
+        const incomingLeads = Array.from(normalizedLeadsMap.values());
+        if (incomingLeads.length === 0) {
+            return alert('No se encontraron leads válidos (se requiere teléfono válido de al menos 9 dígitos).');
+        }
+
+        if (confirm(`¿Importar/Actualizar ${incomingLeads.length} leads? (Los teléfonos existentes se actualizarán)`)) {
+            confirmImportBtn.disabled = true;
+            confirmImportBtn.textContent = '⏳ Procesando duplicados...';
+
+            try {
+                // 2. Fetch all existing leads to check for duplicates
+                // In a production app with many thousands of leads, we might do this via search filters,
+                // but here local variable allLeads is available.
+                const existingLeadsMap = new Map();
+                allLeads.forEach(l => {
+                    if (l.phone) {
+                        const normPhone = l.phone.toString().replace(/\D/g, '');
+                        existingLeadsMap.set(normPhone, l);
+                    }
+                });
+
+                const toUpdate = [];
+                const toCreate = [];
+
+                incomingLeads.forEach(lead => {
+                    const existing = existingLeadsMap.get(lead.phone);
+                    if (existing) {
+                        // Prepare update (only changed fields or all?)
+                        // Prepare update — use unique_id for PATCH
+                        lead.unique_id = existing.unique_id;
+                        toUpdate.push(lead);
+                    } else {
+                        // Prepare creation
+                        lead.unique_id = 'lead_' + lead.phone + '_' + Date.now().toString(36);
+                        toCreate.push(lead);
+                    }
+                });
+
+                confirmImportBtn.textContent = `⏳ Subiendo (${toCreate.length} nuevos, ${toUpdate.length} actualizaciones)...`;
+
+                // 3. Batch Create
+                for (let i = 0; i < toCreate.length; i += 50) {
+                    const batch = toCreate.slice(i, i + 50);
+                    await fetch(`${API_BASE}/${LEADS_TABLE}/records`, {
+                        method: 'POST',
+                        headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+                        body: JSON.stringify(batch)
+                    });
+                }
+
+                // 4. Batch Update (NocoDB v2 supports bulk PATCH)
+                for (let i = 0; i < toUpdate.length; i += 50) {
+                    const batch = toUpdate.slice(i, i + 50);
+                    await fetch(`${API_BASE}/${LEADS_TABLE}/records`, {
+                        method: 'PATCH',
+                        headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+                        body: JSON.stringify(batch)
+                    });
+                }
+
+                alert(`¡Importación completada!\n- Nuevos: ${toCreate.length}\n- Actualizados: ${toUpdate.length}`);
+                mappingModal.classList.remove('active');
+                invalidateLeadsCache();
+                loadLeadsManager();
+            } catch (err) {
+                console.error('Error importing leads:', err);
+                alert('Error durante la importación');
+            } finally {
+                confirmImportBtn.disabled = false;
+                confirmImportBtn.textContent = '🚀 Importar Leads';
+                fileInput.value = '';
+            }
+        }
+    };
+
+    function autoDetectMapping(headers) {
+        const mapping = {};
+        const assignedSystemFields = new Set();
+
+        headers.forEach(header => {
+            const lowerHeader = header.toLowerCase().trim();
+
+            // Find best matching system field
+            let bestMatch = null;
+            for (const field of SYSTEM_FIELDS) {
+                if (assignedSystemFields.has(field.key)) continue;
+
+                if (field.keywords.some(kw => lowerHeader.includes(kw) || kw.includes(lowerHeader))) {
+                    bestMatch = field.key;
+                    break;
+                }
+            }
+
+            if (bestMatch) {
+                mapping[header] = bestMatch;
+                assignedSystemFields.add(bestMatch);
+            } else {
+                mapping[header] = 'skip';
+            }
+        });
+
+        return mapping;
+    }
+
+    function renderMappingUI(headers, previewRows, mapping) {
+        const body = document.getElementById('csv-mapping-body');
+        const previewHead = document.getElementById('csv-preview-head');
+        const previewBody = document.getElementById('csv-preview-body');
+
+        body.innerHTML = '';
+        headers.forEach(header => {
+            const tr = document.createElement('tr');
+
+            // CSV Header cell
+            const tdHeader = document.createElement('td');
+            tdHeader.innerHTML = `<strong>${header}</strong>`;
+
+            // System Field Select cell
+            const tdSelect = document.createElement('td');
+            const select = document.createElement('select');
+            select.className = 'mapping-select';
+            select.dataset.header = header;
+
+            let options = '<option value="skip">-- Saltar esta columna --</option>';
+            SYSTEM_FIELDS.forEach(field => {
+                const selected = mapping[header] === field.key ? 'selected' : '';
+                options += `<option value="${field.key}" ${selected}>${field.label}</option>`;
+            });
+            select.innerHTML = options;
+            tdSelect.appendChild(select);
+
+            // Example data cell
+            const tdExample = document.createElement('td');
+            tdExample.style.color = 'var(--text-secondary)';
+            tdExample.style.fontSize = '12px';
+            tdExample.textContent = previewRows[0] ? previewRows[0][header] : '-';
+
+            tr.appendChild(tdHeader);
+            tr.appendChild(tdSelect);
+            tr.appendChild(tdExample);
+            body.appendChild(tr);
+        });
+
+        // Render Preview Table
+        previewHead.innerHTML = '<tr>' + headers.map(h => `<th>${h}</th>`).join('') + '</tr>';
+        previewBody.innerHTML = previewRows.map(row => {
+            return '<tr>' + headers.map(h => `<td>${row[h] || ''}</td>`).join('') + '</tr>';
+        }).join('');
+    }
 }
 
 function renderLeadsTable(leads) {
@@ -2006,11 +2954,21 @@ function renderLeadsTable(leads) {
     }
 
     tbody.innerHTML = leads.map(lead => {
-        const leadId = lead.unique_id || lead.Id || lead.id;
+        const leadId = lead.unique_id;
         // Escape single quotes for HTML onclick attributes
         const escapedName = (lead.name || 'Sin nombre').replace(/'/g, "\\'");
         const escapedPhone = (lead.phone || '').replace(/'/g, "\\'");
         const escapedId = (leadId || '').toString().replace(/'/g, "\\'");
+
+        const otherInfo = [];
+        const sexo = lead.sexo || lead.Sexo;
+        const edad = lead.edad || lead.Edad;
+        const cp = lead.cod_postal || lead['Código Postal'];
+        const localidad = lead.localidad || lead.Localidad;
+
+        if (sexo) otherInfo.push(sexo);
+        if (edad) otherInfo.push(edad + ' años');
+        if (cp) otherInfo.push('CP: ' + cp);
 
         return `
             <tr data-id="${escapedId}">
@@ -2018,11 +2976,15 @@ function renderLeadsTable(leads) {
                     <button class="btn-detail" onclick="triggerManualCall('${escapedPhone}', '${escapedName}')" title="Llamar ahora">📞</button>
                     <button class="btn-detail" onclick="openLeadEditor('${escapedId}')" title="Editar">✏️</button>
                 </td>
-                <td><strong>${lead.name || 'Sin nombre'}</strong></td>
-                <td><small class="text-muted">${lead.sector || '-'}</small></td>
-                <td>${lead.phone || '-'}</td>
-                <td>${lead.email || '-'}</td>
-                <td><span class="status-badge ${getBadgeStatusClass(lead.status)}">${lead.status || 'Nuevo'}</span></td>
+                <td><strong>${escapeHtml(lead.name || 'Sin nombre')}</strong></td>
+                <td>
+                    <div>${escapeHtml(lead.sector || '-')}</div>
+                    <div style="font-size: 11px; color: var(--text-secondary);">${escapeHtml(localidad || '')}</div>
+                </td>
+                <td>${escapeHtml(lead.phone || '-')}</td>
+                <td>${escapeHtml(lead.email || '-')}</td>
+                <td><span class="status-badge ${getBadgeStatusClass(lead.status)}">${escapeHtml(lead.status || 'Nuevo')}</span></td>
+                <td><small style="color: var(--text-secondary); line-height: 1.2; display: block;">${escapeHtml(otherInfo.join(' | ') || '-')}</small></td>
                 <td>${lead.fecha_planificada ? utcStringToLocalDate(lead.fecha_planificada).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-'}</td>
             </tr>
         `;
@@ -2118,7 +3080,7 @@ document.getElementById('lead-form').addEventListener('submit', async (e) => {
     saveBtn.disabled = true;
 
     try {
-        const LEADS_TABLE = 'mgot1kl4sglenym';
+
         let res;
 
         if (leadId) {
@@ -2147,6 +3109,7 @@ document.getElementById('lead-form').addEventListener('submit', async (e) => {
 
         if (res.ok) {
             closeLeadModal();
+            invalidateLeadsCache();
             loadLeadsManager(); // Refresh table
             fetchScheduledLeads(); // Refresh calendar if changed
         } else {
@@ -2168,9 +3131,10 @@ window.triggerManualCall = async function (phone, name) {
     if (!phone) return alert('No hay teléfono disponible');
     // Reuse existing logic from manual call modal
     document.getElementById('manual-phone').value = phone;
-    document.getElementById('manual-company').value = name;
     document.getElementById('manual-lead-name').value = name;
-    document.getElementById('manual-call-modal').classList.add('active');
+    document.getElementById('call-feedback').textContent = '';
+    document.getElementById('trigger-call-btn').textContent = '🚀 Lanzar Llamada';
+    document.getElementById('manual-call-modal').style.display = 'flex';
 };
 
 async function loadData(skipEnrichment = false) {
@@ -2182,9 +3146,6 @@ async function loadData(skipEnrichment = false) {
             initAutomationToggle();
             window.tabsInitialized = true;
         }
-
-        // Fetch planning data in background
-        fetchScheduledLeads();
 
         // Pre-fetch confirmed data in parallel with call logs
         const [calls] = await Promise.all([
@@ -2211,12 +3172,12 @@ async function loadData(skipEnrichment = false) {
             'nenucos', 'nuevo', 'aaa', 'test', 'sans rober', 'mantecados 3', 'sergio test 3',
             'locutorios martinez', 'viviana s.l.', 'consultoria luis', 'gestoria luis', 'gestalia'];
         const isTestCall = (c) => {
-            if (c.is_test === true || c.is_test === 1) return true;
+            if (c.is_test === true || c.is_test === 1 || c.is_test === '1') return true;
             if ((c.ended_reason || '').includes('Manual Trigger')) return true;
             const name = (c.lead_name || '').toLowerCase().trim();
             if (TEST_NAMES.includes(name)) return true;
-            // Heuristic: if lead_name doesn't contain corporate suffixes and is short, classify as test
-            if (!/(sl|sa|s\.l\.|s\.a\.|sociedad|limitada)/i.test(name) && name.length > 0 && name.length < 25) return true;
+            // Only match names that look explicitly like test entries (contain 'test' keyword)
+            if (name && /\btest\b/i.test(name)) return true;
             return false;
         };
         const testCalls = calls.filter(c => isTestCall(c));
@@ -2314,157 +3275,159 @@ async function loadData(skipEnrichment = false) {
 
         const tbody = document.getElementById('call-table');
         const paginationContainer = document.getElementById('call-pagination');
+
         if (filteredCalls.length === 0) {
             tbody.innerHTML = '<tr><td colspan="12" class="empty-state">No hay llamadas registradas que coincidan con el filtro</td></tr>';
             if (paginationContainer) paginationContainer.innerHTML = '';
-            return;
-        }
+        } else {
+            tbody.innerHTML = '';
 
-        tbody.innerHTML = '';
+            // Build a map of parent vapi_call_id → retry calls for grouping
+            const retryMap = new Map(); // parentVapiId → [retryCall indexes]
+            const retryChildIndexes = new Set(); // indexes that are retries (to skip in main loop)
 
-        // Build a map of parent vapi_call_id → retry calls for grouping
-        const retryMap = new Map(); // parentVapiId → [retryCall indexes]
-        const retryChildIndexes = new Set(); // indexes that are retries (to skip in main loop)
-
-        filteredCalls.forEach((call, index) => {
-            const reason = call.ended_reason || '';
-            const retryMatch = reason.match(/^Retry:?\s*([a-f0-9-]{8,})/i);
-            if (retryMatch) {
-                const parentIdPrefix = retryMatch[1].replace(/\.+$/, '');
-                // Find the parent call in filteredCalls
-                const parentIdx = filteredCalls.findIndex(c => {
-                    const cId = c.vapi_call_id || c.lead_id || '';
-                    return cId.startsWith(parentIdPrefix);
-                });
-                if (parentIdx >= 0) {
-                    if (!retryMap.has(parentIdx)) retryMap.set(parentIdx, []);
-                    retryMap.get(parentIdx).push(index);
-                    retryChildIndexes.add(index);
-                    // Store the parent vapi_call_id on the retry call for reference
-                    call._retryParentIdx = parentIdx;
+            filteredCalls.forEach((call, index) => {
+                const reason = call.ended_reason || '';
+                const retryMatch = reason.match(/^Retry:?\s*([a-f0-9-]{8,})/i);
+                if (retryMatch) {
+                    const parentIdPrefix = retryMatch[1].replace(/\.+$/, '');
+                    // Find the parent call in filteredCalls
+                    const parentIdx = filteredCalls.findIndex(c => {
+                        const cId = c.vapi_call_id || c.lead_id || '';
+                        return cId.startsWith(parentIdPrefix);
+                    });
+                    if (parentIdx >= 0) {
+                        if (!retryMap.has(parentIdx)) retryMap.set(parentIdx, []);
+                        retryMap.get(parentIdx).push(index);
+                        retryChildIndexes.add(index);
+                        // Store the parent vapi_call_id on the retry call for reference
+                        call._retryParentIdx = parentIdx;
+                    }
                 }
+            });
+
+            // Build display-order list (parents + their retries grouped together), excluding standalone retries
+            const displayOrder = [];
+            filteredCalls.forEach((call, index) => {
+                if (retryChildIndexes.has(index)) return;
+                displayOrder.push({ call, index, isRetry: false });
+                if (retryMap.has(index)) {
+                    retryMap.get(index).forEach(retryIdx => {
+                        displayOrder.push({ call: filteredCalls[retryIdx], index: retryIdx, isRetry: true, parentCall: call });
+                    });
+                }
+            });
+
+            // ── Pagination: slice for current page ──
+            const totalItems = displayOrder.length;
+            const totalPages = Math.ceil(totalItems / paginationPageSize);
+            if (paginationPage > totalPages) paginationPage = totalPages;
+            if (paginationPage < 1) paginationPage = 1;
+            const startIdx = (paginationPage - 1) * paginationPageSize;
+            const endIdx = Math.min(startIdx + paginationPageSize, totalItems);
+            const pageItems = displayOrder.slice(startIdx, endIdx);
+
+            // Helper to render a single call row
+            function renderCallRow(call, index, isRetry = false, parentCall = null) {
+                const tr = document.createElement('tr');
+                const vapiId = call.vapi_call_id || call.lead_id || call.id || call.Id || '-';
+                const shortId = vapiId.length > 20 ? vapiId.substring(0, 8) + '...' : vapiId;
+
+                const confirmed = isConfirmed(call);
+                if (confirmed) tr.classList.add('confirmed-row');
+
+                // Detect unenriched rows (data not yet fetched from Vapi)
+                const isUnenriched = !call.evaluation || call.evaluation === 'Pendiente' ||
+                    call.ended_reason === 'Call Initiated' || call.ended_reason === 'call_initiated' ||
+                    call.ended_reason === 'Bulk Call Trigger' || call.ended_reason === 'Manual Trigger';
+                if (isUnenriched) tr.classList.add('unenriched-row');
+
+                // Add retry styling class
+                if (isRetry) {
+                    tr.classList.add('retry-subcall-row');
+                }
+                // Add parent class if it has retries
+                if (retryMap.has(index)) {
+                    tr.classList.add('retry-parent-row');
+                }
+
+                // Get confirmed data from pre-fetched map
+                const confData = confirmedDataMap[call.vapi_call_id];
+                let confirmedCell = '❌';
+                if (confirmed && confData) {
+                    const resolvedPhone = sanitizePhone(confData.rawPhone, call.phone_called);
+                    const apptHtml = confData.appointmentDate ? `<div class="confirmed-detail-item"><span class="confirmed-label">🗓️</span> ${formatAppointmentDate(confData.appointmentDate)}</div>` : '';
+                    confirmedCell = `
+                        <div class="confirmed-inline">
+                            <span class="confirmed-badge">✅ Confirmado</span>
+                            <div class="confirmed-details">
+                                <div class="confirmed-detail-item"><span class="confirmed-label">👤</span> ${confData.name}</div>
+                                <div class="confirmed-detail-item"><span class="confirmed-label">📧</span> ${confData.email}</div>
+                                <div class="confirmed-detail-item"><span class="confirmed-label">📞</span> ${resolvedPhone}</div>
+                                ${apptHtml}
+                            </div>
+                        </div>`;
+                } else if (confirmed) {
+                    confirmedCell = '<span class="confirmed-badge">✅ Confirmado</span>';
+                }
+
+                const scoreVal = call._score || 0;
+                const scoreLbl = getScoreLabel(scoreVal);
+                const scoreClr = getScoreColor(scoreVal);
+
+                // For retry calls, show a special "Resultado" with link badge
+                let resultadoCell = call.ended_reason || '-';
+                let empresaCell = `<strong>${call.lead_name || '-'}</strong>`;
+                let idCell = `<code style="font-family: monospace; color: var(--accent); font-size: 11px;" title="${vapiId}">${shortId}</code> <button class="copy-id-btn" data-copy-id="${vapiId}" title="Copiar ID completo" style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 4px;opacity:0.6;transition:opacity 0.2s;vertical-align:middle;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">📋</button>`;
+
+                if (isRetry) {
+                    idCell = `<span class="retry-connector">↳</span> <code style="font-family: monospace; color: #22c55e; font-size: 11px;" title="${vapiId}">${shortId}</code> <button class="copy-id-btn" data-copy-id="${vapiId}" title="Copiar ID completo" style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 4px;opacity:0.6;transition:opacity 0.2s;vertical-align:middle;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">📋</button>`;
+                    empresaCell = `<span class="retry-badge">🔄 Rellamada</span>`;
+                    resultadoCell = call.ended_reason ? call.ended_reason.replace(/^Retry:?\s*[a-f0-9-]+\.{0,3}\s*/i, '').trim() || call.ended_reason : '-';
+                }
+
+                // For parent calls that have retries, add a subtle indicator
+                if (retryMap.has(index)) {
+                    const retryCount = retryMap.get(index).length;
+                    empresaCell += ` <span class="retry-count-badge" title="${retryCount} rellamada(s)">🔄 ${retryCount}</span>`;
+                }
+
+                // Build cell content — grey placeholders for unenriched rows
+                const placeholderSpan = '<span class="unenriched-placeholder">⏳</span>';
+
+                tr.innerHTML = `
+                    <td data-label="Acciones" class="actions-cell-calls">
+                        <button class="action-btn" data-index="${index}">👁 Ver Detalle</button>
+                        <button class="action-btn mark-test-btn" data-call-id="${call.id || call.Id}" title="Marcar como Test">🧪</button>
+                        <button class="action-btn mark-contestador-btn" data-call-id="${call.id || call.Id}" data-phone="${call.phone_called || ''}" title="Marcar como Contestador">📞🤖</button>
+                    </td>
+                    <td data-label="Call ID">${idCell}</td>
+                    <td data-label="Empresa">${empresaCell}</td>
+                    <td data-label="Teléfono" class="phone">${call.phone_called || '-'}</td>
+                    <td data-label="Fecha">${formatDate(call.call_time || call.CreatedAt)}</td>
+                    <td data-label="Resultado">${isUnenriched ? placeholderSpan : resultadoCell}</td>
+                    <td data-label="Evaluación">${isUnenriched ? '<span class="badge unenriched-badge">⏳ Cargando...</span>' : `<span class="badge ${getBadgeClass(call.evaluation)}">${call.evaluation || 'Pendiente'}</span>`}</td>
+                    <td data-label="Duración">${isUnenriched ? placeholderSpan : formatDuration(call.duration_seconds)}</td>
+                    <td data-label="Score">${isUnenriched ? placeholderSpan : `<span class="score-badge ${scoreLbl.cls}" style="--score-color: ${scoreClr}">${scoreLbl.emoji} ${scoreVal}</span>`}</td>
+                    <td data-label="Notas" class="table-notes">${call.Notes ? `<span class="note-indicator" data-index="${index}" title="${call.Notes}" style="cursor: pointer;">📝</span>` : '-'}</td>
+                    <td data-label="Confirmado">${isUnenriched ? placeholderSpan : confirmedCell}</td>
+                `;
+                return tr;
             }
-        });
 
-        // Build display-order list (parents + their retries grouped together), excluding standalone retries
-        const displayOrder = [];
-        filteredCalls.forEach((call, index) => {
-            if (retryChildIndexes.has(index)) return;
-            displayOrder.push({ call, index, isRetry: false });
-            if (retryMap.has(index)) {
-                retryMap.get(index).forEach(retryIdx => {
-                    displayOrder.push({ call: filteredCalls[retryIdx], index: retryIdx, isRetry: true, parentCall: call });
-                });
-            }
-        });
+            // Render only the current page items
+            pageItems.forEach(item => {
+                const tr = renderCallRow(item.call, item.index, item.isRetry, item.parentCall || null);
+                tbody.appendChild(tr);
+            });
 
-        // ── Pagination: slice for current page ──
-        const totalItems = displayOrder.length;
-        const totalPages = Math.ceil(totalItems / paginationPageSize);
-        if (paginationPage > totalPages) paginationPage = totalPages;
-        if (paginationPage < 1) paginationPage = 1;
-        const startIdx = (paginationPage - 1) * paginationPageSize;
-        const endIdx = Math.min(startIdx + paginationPageSize, totalItems);
-        const pageItems = displayOrder.slice(startIdx, endIdx);
+            // Render pagination controls
+            renderPagination(totalItems, paginationPage, paginationPageSize, totalPages);
 
-        // Helper to render a single call row
-        function renderCallRow(call, index, isRetry = false, parentCall = null) {
-            const tr = document.createElement('tr');
-            const vapiId = call.vapi_call_id || call.lead_id || call.id || call.Id || '-';
-            const shortId = vapiId.length > 20 ? vapiId.substring(0, 8) + '...' : vapiId;
-
-            const confirmed = isConfirmed(call);
-            if (confirmed) tr.classList.add('confirmed-row');
-
-            // Detect unenriched rows (data not yet fetched from Vapi)
-            const isUnenriched = !call.evaluation || call.evaluation === 'Pendiente' ||
-                call.ended_reason === 'Call Initiated' || call.ended_reason === 'call_initiated' ||
-                call.ended_reason === 'Bulk Call Trigger' || call.ended_reason === 'Manual Trigger';
-            if (isUnenriched) tr.classList.add('unenriched-row');
-
-            // Add retry styling class
-            if (isRetry) {
-                tr.classList.add('retry-subcall-row');
-            }
-            // Add parent class if it has retries
-            if (retryMap.has(index)) {
-                tr.classList.add('retry-parent-row');
-            }
-
-            // Get confirmed data from pre-fetched map
-            const confData = confirmedDataMap[call.vapi_call_id];
-            let confirmedCell = '❌';
-            if (confirmed && confData) {
-                const resolvedPhone = sanitizePhone(confData.rawPhone, call.phone_called);
-                confirmedCell = `
-                    <div class="confirmed-inline">
-                        <span class="confirmed-badge">✅ Confirmado</span>
-                        <div class="confirmed-details">
-                            <div class="confirmed-detail-item"><span class="confirmed-label">👤</span> ${confData.name}</div>
-                            <div class="confirmed-detail-item"><span class="confirmed-label">📧</span> ${confData.email}</div>
-                            <div class="confirmed-detail-item"><span class="confirmed-label">📞</span> ${resolvedPhone}</div>
-                        </div>
-                    </div>`;
-            } else if (confirmed) {
-                confirmedCell = '<span class="confirmed-badge">✅ Confirmado</span>';
-            }
-
-            const scoreVal = call._score || 0;
-            const scoreLbl = getScoreLabel(scoreVal);
-            const scoreClr = getScoreColor(scoreVal);
-
-            // For retry calls, show a special "Resultado" with link badge
-            let resultadoCell = call.ended_reason || '-';
-            let empresaCell = `<strong>${call.lead_name || '-'}</strong>`;
-            let idCell = `<code style="font-family: monospace; color: var(--accent); font-size: 11px;" title="${vapiId}">${shortId}</code> <button class="copy-id-btn" data-copy-id="${vapiId}" title="Copiar ID completo" style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 4px;opacity:0.6;transition:opacity 0.2s;vertical-align:middle;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">📋</button>`;
-
-            if (isRetry) {
-                idCell = `<span class="retry-connector">↳</span> <code style="font-family: monospace; color: #22c55e; font-size: 11px;" title="${vapiId}">${shortId}</code> <button class="copy-id-btn" data-copy-id="${vapiId}" title="Copiar ID completo" style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 4px;opacity:0.6;transition:opacity 0.2s;vertical-align:middle;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">📋</button>`;
-                empresaCell = `<span class="retry-badge">🔄 Rellamada</span>`;
-                resultadoCell = call.ended_reason ? call.ended_reason.replace(/^Retry:?\s*[a-f0-9-]+\.{0,3}\s*/i, '').trim() || call.ended_reason : '-';
-            }
-
-            // For parent calls that have retries, add a subtle indicator
-            if (retryMap.has(index)) {
-                const retryCount = retryMap.get(index).length;
-                empresaCell += ` <span class="retry-count-badge" title="${retryCount} rellamada(s)">🔄 ${retryCount}</span>`;
-            }
-
-            // Build cell content — grey placeholders for unenriched rows
-            const placeholderSpan = '<span class="unenriched-placeholder">⏳</span>';
-
-            tr.innerHTML = `
-                <td data-label="Acciones" class="actions-cell-calls">
-                    <button class="action-btn" data-index="${index}">👁 Ver Detalle</button>
-                    <button class="action-btn mark-test-btn" data-call-id="${call.id || call.Id}" title="Marcar como Test">🧪</button>
-                    <button class="action-btn mark-contestador-btn" data-call-id="${call.id || call.Id}" data-phone="${call.phone_called || ''}" title="Marcar como Contestador">📞🤖</button>
-                </td>
-                <td data-label="Call ID">${idCell}</td>
-                <td data-label="Empresa">${empresaCell}</td>
-                <td data-label="Teléfono" class="phone">${call.phone_called || '-'}</td>
-                <td data-label="Fecha">${formatDate(call.call_time || call.CreatedAt)}</td>
-                <td data-label="Resultado">${isUnenriched ? placeholderSpan : resultadoCell}</td>
-                <td data-label="Evaluación">${isUnenriched ? '<span class="badge unenriched-badge">⏳ Cargando...</span>' : `<span class="badge ${getBadgeClass(call.evaluation)}">${call.evaluation || 'Pendiente'}</span>`}</td>
-                <td data-label="Duración">${isUnenriched ? placeholderSpan : formatDuration(call.duration_seconds)}</td>
-                <td data-label="Score">${isUnenriched ? placeholderSpan : `<span class="score-badge ${scoreLbl.cls}" style="--score-color: ${scoreClr}">${scoreLbl.emoji} ${scoreVal}</span>`}</td>
-                <td data-label="Notas" class="table-notes">${call.Notes ? `<span class="note-indicator" data-index="${index}" title="${call.Notes}" style="cursor: pointer;">📝</span>` : '-'}</td>
-                <td data-label="Confirmado">${isUnenriched ? placeholderSpan : confirmedCell}</td>
-            `;
-            return tr;
+            // Update Chart
+            renderChart(filteredCalls);
+            currentCallsPage = filteredCalls;
         }
-
-        // Render only the current page items
-        pageItems.forEach(item => {
-            const tr = renderCallRow(item.call, item.index, item.isRetry, item.parentCall || null);
-            tbody.appendChild(tr);
-        });
-
-        // Render pagination controls
-        renderPagination(totalItems, paginationPage, paginationPageSize, totalPages);
-
-        // Update Chart
-        renderChart(filteredCalls);
-        currentCallsPage = filteredCalls;
 
         // Start background sync for pending ones
         syncPendingCalls();
@@ -2473,6 +3436,8 @@ async function loadData(skipEnrichment = false) {
         renderTestCalls(testCalls);
     } catch (err) {
         console.error('[loadData] Error completo:', err);
+        const isNetwork = err.type === 'NETWORK_ERROR';
+        const isHTTP = err.type === 'HTTP_ERROR';
         const errType = err.type || 'UNKNOWN';
         const errMsg = err.message || 'Error desconocido';
         const errDetail = err.detail || '';
@@ -2554,7 +3519,8 @@ function renderTestCalls(testCalls) {
         const confData = confirmedDataMap[call.vapi_call_id];
         let confirmedCell = '❌';
         if (confirmed && confData) {
-            confirmedCell = `<span class="confirmed-badge">✅ Confirmado</span>`;
+            const apptLabel = confData.appointmentDate ? ` 🗓️ ${formatAppointmentDate(confData.appointmentDate)}` : '';
+            confirmedCell = `<span class="confirmed-badge">✅ Confirmado${apptLabel}</span>`;
         } else if (confirmed) {
             confirmedCell = '<span class="confirmed-badge">✅</span>';
         }
@@ -2684,7 +3650,7 @@ async function toggleContestadorStatus(callId, phone) {
 
         // 3. Update lead status in Leads table by phone
         if (phone) {
-            const LEADS_TABLE = 'mgot1kl4sglenym';
+
             const cleanPhone = phone.replace(/^\+34/, '').replace(/\D/g, '');
             // Try both formats
             for (const searchPhone of [phone, cleanPhone]) {
@@ -2695,7 +3661,7 @@ async function toggleContestadorStatus(callId, phone) {
                     const searchData = await searchRes.json();
                     if (searchData.list && searchData.list.length > 0) {
                         const lead = searchData.list[0];
-                        const leadId = lead.unique_id || lead.Id || lead.id;
+                        const leadId = lead.unique_id;
                         await fetch(`${API_BASE}/${LEADS_TABLE}/records`, {
                             method: 'PATCH',
                             headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
@@ -2878,7 +3844,7 @@ document.getElementById('detail-modal').addEventListener('click', (e) => {
 
 document.getElementById('login-form').addEventListener('submit', (e) => {
     e.preventDefault();
-    const ADMIN_PASSWORD = 'admin123';
+    const ADMIN_PASSWORD = (window.APP_CONFIG && window.APP_CONFIG.DASHBOARD_PASSWORD) || 'solar2025';
     const password = document.getElementById('password-input').value;
     if (password === ADMIN_PASSWORD) {
         localStorage.setItem('dashboard_auth', 'true');
@@ -2906,7 +3872,16 @@ function showDashboard() {
         }
     });
 
-    loadData();
+    // Initialize tabs and load only the active tab's data (lazy loading)
+    if (!window.tabsInitialized) {
+        initTabs();
+        initBulkImport();
+        initAutomationToggle();
+        window.tabsInitialized = true;
+    }
+
+    const activeHash = location.hash.replace('#', '') || 'dashboard';
+    switchToTab(activeHash);
 }
 
 function checkAuth() {
@@ -2959,27 +3934,28 @@ function utcStringToLocalDate(utcStr) {
 }
 
 // --- Manual Vapi Call Integration ---
-const VAPI_ASSISTANT_ID = '49e56db1-1f20-4cf1-b031-9cea9fba73cb';
-const VAPI_PHONE_NUMBER_ID = '611c8c8e-ab43-4af0-8df0-f2f8fac8115b';
+// VAPI_ASSISTANT_ID and VAPI_PHONE_NUMBER_ID come from window.APP_CONFIG
 
 function normalizePhone(phone) {
     let p = phone.toString().replace(/\D/g, '');
     if (!p) return '';
+    // Vapi requires E.164 (+CCNUMBER)
+    // Note: Zadarma routing fix is done via Zadarma Calling Rules (strip leading 34)
     return p.startsWith('34') ? '+' + p : '+34' + p;
 }
 
 async function triggerManualCall() {
     const name = document.getElementById('manual-lead-name').value;
-    const company = document.getElementById('manual-company').value;
     const phone = document.getElementById('manual-phone').value;
+    const locality = document.getElementById('manual-locality').value;
     const assistantId = document.getElementById('manual-assistant').value;
     const isScheduled = document.getElementById('manual-schedule-toggle').checked;
     const scheduledTime = document.getElementById('manual-schedule-time').value;
     const feedback = document.getElementById('call-feedback');
     const btn = document.getElementById('trigger-call-btn');
 
-    if (!name || !phone || !company) {
-        feedback.textContent = '❌ Por favor, rellena todos los campos';
+    if (!name || !phone || !locality) {
+        feedback.textContent = '❌ Por favor, rellena todos los campos (incluyendo localidad)';
         feedback.className = 'feedback-error';
         return;
     }
@@ -3000,15 +3976,18 @@ async function triggerManualCall() {
         feedback.className = 'feedback-loading';
 
         try {
-            const LEADS_TABLE = 'mgot1kl4sglenym';
+
             const leadPayload = {
                 unique_id: 'lead_' + Date.now(),
                 name: name,
                 phone: formattedPhone,
                 email: '',
                 sector: '',
-                summary: company || '',
+                Localidad: locality,
+                summary: '',
                 address: '',
+                status: 'Programado',
+                assistant_id: assistantId,
                 fecha_planificada: localDatetimeToUTC(scheduledTime)
             };
 
@@ -3028,8 +4007,10 @@ async function triggerManualCall() {
                 feedback.className = 'feedback-success';
                 setTimeout(() => {
                     closeManualModal();
+                    invalidateLeadsCache();
                     loadData();
                     fetchScheduledLeads();
+                    renderScheduledCallsInScheduler();
                 }, 2000);
             } else {
                 const errBody = await res.json();
@@ -3052,8 +4033,25 @@ async function triggerManualCall() {
     feedback.textContent = 'Comprobando llamadas activas...';
     feedback.className = 'feedback-loading';
 
+    // helper: append a log line to feedback
+    const log = (icon, msg, cls = '') => {
+        const line = document.createElement('div');
+        line.style.cssText = 'font-size:12px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.05);text-align:left;';
+        if (cls) line.style.color = cls === 'ok' ? '#4ade80' : cls === 'err' ? '#f87171' : '#facc15';
+        line.textContent = `${icon} ${msg}`;
+        feedback.appendChild(line);
+    };
+
     try {
+        feedback.innerHTML = '';
+        feedback.className = '';
+        feedback.style.cssText = 'background:rgba(0,0,0,0.3);border-radius:8px;padding:10px 14px;margin-top:12px;max-height:260px;overflow-y:auto;font-family:monospace;';
+        log('🔍', `Teléfono: ${formattedPhone}`);
+        log('🤖', `Asistente: ${assistantId}`);
+        log('📡', `Phone Number ID: ${VAPI_PHONE_NUMBER_ID}`);
+
         // ⚠️ CRITICAL: Check concurrency limit before launching
+        log('⏳', 'Comprobando llamadas activas en Vapi...');
         try {
             const checkRes = await fetch('https://api.vapi.ai/call?limit=100', {
                 headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
@@ -3065,52 +4063,77 @@ async function triggerManualCall() {
                 );
                 const MAX_CONCURRENT = 10;
                 if (activeCalls.length >= MAX_CONCURRENT) {
-                    feedback.textContent = `🚫 Límite de concurrencia alcanzado: ${activeCalls.length}/${MAX_CONCURRENT} llamadas activas. Espera a que terminen algunas llamadas antes de lanzar una nueva.`;
-                    feedback.className = 'feedback-error';
+                    log('🚫', `Límite alcanzado: ${activeCalls.length}/${MAX_CONCURRENT} activas`, 'err');
                     btn.disabled = false;
                     btn.textContent = '🚀 Lanzar Llamada';
                     return;
                 }
-                console.log(`[Concurrency] Active calls: ${activeCalls.length}/${MAX_CONCURRENT} — OK to proceed`);
+                log('✅', `Concurrencia OK: ${activeCalls.length}/${MAX_CONCURRENT} activas`, 'ok');
+            } else {
+                log('⚠️', `No se pudo comprobar concurrencia (HTTP ${checkRes.status})`, 'warn');
             }
         } catch (checkErr) {
-            console.warn('[Concurrency] Could not check active calls:', checkErr.message);
-            // Continue anyway — better to try than to block completely
+            log('⚠️', `Error comprobando concurrencia: ${checkErr.message}`, 'warn');
         }
 
         btn.textContent = '⌛ Iniciando Llamada...';
-        feedback.textContent = 'Conectando con Vapi AI...';
 
         // 1. Call Vapi AI with SIP retry logic
         const MAX_CALL_RETRIES = 3;
-        const RETRY_BACKOFF_BASE = 5000; // 5s, 10s, 20s
+        const RETRY_BACKOFF_BASE = 5000;
         let vapiData = null;
 
         for (let attempt = 1; attempt <= MAX_CALL_RETRIES; attempt++) {
+            if (attempt > 1) log('🔄', `Reintento ${attempt}/${MAX_CALL_RETRIES}...`, 'warn');
+
+            // Vapi API STRICTLY requires E164 format (with the '+' prefix).
+            // We cannot strip it here. The double '34' issue MUST be fixed inside Zadarma's SIP settings (Dial Prefix).
+            const extPhone = formattedPhone;
+
+
+            const vapiPayload = {
+                customer: {
+                    number: extPhone,
+                },
+                assistantId: assistantId,
+                phoneNumberId: VAPI_PHONE_NUMBER_ID,
+                assistantOverrides: {
+                    variableValues: {
+                        nombre: name,
+                        tel_contacto: extPhone,
+                        localidad: locality,
+                        leadId: 'manual_' + Date.now()
+                    }
+                }
+            };
+            log('📤', 'POST /call payload:');
+            const payloadPre = document.createElement('pre');
+            payloadPre.style.cssText = 'font-size:10px;color:#93c5fd;background:rgba(0,0,0,0.5);padding:8px;border-radius:6px;max-height:150px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:4px 0;';
+            payloadPre.textContent = JSON.stringify(vapiPayload, null, 2);
+            feedback.appendChild(payloadPre);
+
             const vapiRes = await fetch('https://api.vapi.ai/call', {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${VAPI_API_KEY}`,
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({
-                    customer: { number: formattedPhone },
-                    assistantId: assistantId,
-                    phoneNumberId: VAPI_PHONE_NUMBER_ID,
-                    assistantOverrides: {
-                        variableValues: {
-                            nombre: name,
-                            empresa: company,
-                            tel_contacto: formattedPhone
-                        }
-                    }
-                })
+                body: JSON.stringify(vapiPayload)
             });
 
             vapiData = await vapiRes.json();
+            // ── FULL RESPONSE LOG ──
+            const fullJson = JSON.stringify(vapiData, null, 2);
+            log(vapiRes.ok ? '✅' : '❌', `Vapi HTTP ${vapiRes.status}`, vapiRes.ok ? 'ok' : 'err');
+            // Render full JSON in a pre block for readability
+            const preBlock = document.createElement('pre');
+            preBlock.style.cssText = 'font-size:10px;color:#e2e8f0;background:rgba(0,0,0,0.5);padding:8px;border-radius:6px;max-height:200px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:4px 0;';
+            preBlock.textContent = fullJson;
+            feedback.appendChild(preBlock);
 
             if (!vapiRes.ok) {
-                const errMsg = vapiData.message || 'Error en Vapi AI';
+                const rawMsg = vapiData.message || vapiData.error || vapiData;
+                const errMsg = Array.isArray(rawMsg) ? rawMsg.join(', ') : String(rawMsg);
                 const isSipError = errMsg.toLowerCase().includes('sip') ||
                     errMsg.includes('503') ||
                     errMsg.toLowerCase().includes('rate') ||
@@ -3118,106 +4141,174 @@ async function triggerManualCall() {
 
                 if (isSipError && attempt < MAX_CALL_RETRIES) {
                     const waitMs = RETRY_BACKOFF_BASE * Math.pow(2, attempt - 1);
-                    feedback.textContent = `⚠️ Error SIP — Reintentando (${attempt}/${MAX_CALL_RETRIES}) en ${waitMs / 1000}s...`;
-                    feedback.className = 'feedback-loading';
-                    console.warn(`[SIP Retry] Attempt ${attempt}/${MAX_CALL_RETRIES}: ${errMsg}. Waiting ${waitMs}ms...`);
+                    log('⚠️', `Error SIP — esperando ${waitMs / 1000}s antes de reintentar...`, 'warn');
                     await new Promise(r => setTimeout(r, waitMs));
                     continue;
                 }
                 throw new Error(errMsg);
             }
-            break; // Success
+            log('🎉', `Llamada creada! Call ID: ${vapiData.id}`, 'ok');
+
+            // ── CALL STATUS POLLING (30s, every 3s) ──
+            log('📡', 'Monitorizando estado de la llamada en tiempo real...', 'warn');
+            const callId = vapiData.id;
+            const POLL_INTERVAL = 3000;
+            const POLL_DURATION = 30000;
+            const pollStart = Date.now();
+            let lastStatus = '';
+            while (Date.now() - pollStart < POLL_DURATION) {
+                await new Promise(r => setTimeout(r, POLL_INTERVAL));
+                try {
+                    const statusRes = await fetch(`https://api.vapi.ai/call/${callId}`, {
+                        headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
+                    });
+                    const statusData = await statusRes.json();
+                    const status = statusData.status || 'unknown';
+                    const endedReason = statusData.endedReason || '';
+                    const sipCode = statusData.costs?.find(c => c.type === 'transport')?.sipCode || '';
+                    const phoneNum = statusData.phoneNumber || {};
+                    const transport = statusData.transport || {};
+
+                    const statusLine = `Estado: ${status}` +
+                        (endedReason ? ` | Razón: ${endedReason}` : '') +
+                        (sipCode ? ` | SIP Code: ${sipCode}` : '');
+
+                    if (status !== lastStatus) {
+                        const color = status === 'ended' ? (endedReason.includes('error') ? 'err' : 'ok') :
+                            status === 'in-progress' ? 'ok' :
+                                status === 'ringing' ? 'ok' : 'warn';
+                        log('📊', statusLine, color);
+
+                        // On first status change, show transport/phone details once
+                        if (!lastStatus) {
+                            if (Object.keys(transport).length) {
+                                log('🔌', `Transport: ${JSON.stringify(transport)}`, 'warn');
+                            }
+                            if (Object.keys(phoneNum).length) {
+                                log('📞', `Phone Config: provider=${phoneNum.provider || 'N/A'}, number=${phoneNum.number || 'N/A'}, sipUri=${phoneNum.sipUri || 'N/A'}`, 'warn');
+                            }
+                        }
+                        lastStatus = status;
+                    }
+
+                    // If call ended, show full final status
+                    if (status === 'ended') {
+                        log('🏁', 'Llamada finalizada. Respuesta completa:', endedReason.includes('error') ? 'err' : 'ok');
+                        const finalPre = document.createElement('pre');
+                        finalPre.style.cssText = 'font-size:10px;color:#fbbf24;background:rgba(0,0,0,0.5);padding:8px;border-radius:6px;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:4px 0;';
+                        // Show key diagnostic fields
+                        const diagnosticData = {
+                            id: statusData.id,
+                            status: statusData.status,
+                            endedReason: statusData.endedReason,
+                            startedAt: statusData.startedAt,
+                            endedAt: statusData.endedAt,
+                            type: statusData.type,
+                            transport: statusData.transport,
+                            phoneNumber: statusData.phoneNumber,
+                            customer: statusData.customer,
+                            costs: statusData.costs,
+                            messages: statusData.messages?.slice(0, 5), // first 5 messages
+                        };
+                        finalPre.textContent = JSON.stringify(diagnosticData, null, 2);
+                        feedback.appendChild(finalPre);
+                        break;
+                    }
+                } catch (pollErr) {
+                    log('⚠️', `Error polling: ${pollErr.message}`, 'warn');
+                }
+            }
+            if (Date.now() - pollStart >= POLL_DURATION && lastStatus !== 'ended') {
+                log('⏱️', `Polling terminado (30s). Último estado: ${lastStatus || 'sin respuesta'}`, 'warn');
+            }
+
+            break;
         }
 
-        feedback.textContent = '✅ Llamada iniciada. Registrando en log...';
-
         // 2. Log to NocoDB
+        log('💾', `Registrando en NocoDB (table: ${CALL_LOGS_TABLE})...`);
+        const logPayload = {
+            vapi_call_id: vapiData.id,
+            lead_name: name,
+            phone_called: formattedPhone,
+            call_time: new Date().toISOString(),
+            ended_reason: 'Manual Trigger'
+        };
+        log('📤', `NocoDB payload: ${JSON.stringify(logPayload)}`);
+
         const logRes = await fetch(`${API_BASE}/${CALL_LOGS_TABLE}/records`, {
             method: 'POST',
             headers: {
                 'xc-token': XC_TOKEN,
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({
-                vapi_call_id: vapiData.id,
-                lead_name: company || name,
-                phone_called: formattedPhone,
-                call_time: new Date().toISOString(),
-                ended_reason: 'Manual Trigger'
-            })
+            body: JSON.stringify(logPayload)
         });
+        const logBody = await logRes.json();
+        log(logRes.ok ? '✅' : '❌', `NocoDB HTTP ${logRes.status}: ${JSON.stringify(logBody)}`, logRes.ok ? 'ok' : 'err');
 
         if (logRes.ok) {
-            feedback.textContent = '🚀 ¡Llamada lanzada con éxito!';
-            feedback.className = 'feedback-success';
-            setTimeout(async () => {
-                closeManualModal();
-                loadData();
+            log('🚀', '¡LLAMADA LANZADA CON ÉXITO! El modal permanece abierto.', 'ok');
+            btn.textContent = '✅ Llamada en curso';
+            btn.style.background = 'var(--accent)';
+            loadData(); // refresh dashboard in background
 
-                // 3. Clear scheduled status in Leads table so it disappears from Planning section
-                try {
-                    const LEADS_TABLE = 'mgot1kl4sglenym';
-                    // Search by raw phone first (as stored in DB), then normalized
-                    const rawPhone = document.getElementById('manual-phone').value.trim();
-                    const normalizedPhone = normalizePhone(formattedPhone);
+            // 3. Clear scheduled status
+            try {
+                const rawPhone = document.getElementById('manual-phone').value.trim();
+                const normalizedPhone = normalizePhone(formattedPhone);
+                log('🔍', `Buscando lead para limpiar fecha_planificada: ${rawPhone}`);
 
-                    console.log(`[Persistence] Searching for lead: raw=${rawPhone}, normalized=${normalizedPhone}`);
+                let searchRes = await fetch(`${API_BASE}/${LEADS_TABLE}/records?where=(phone,eq,${encodeURIComponent(rawPhone)})`, {
+                    headers: { 'xc-token': XC_TOKEN }
+                });
+                let searchData = await searchRes.json();
+                let leadToClear = searchData.list && searchData.list[0];
 
-                    // Try raw phone first (many leads stored without +34)
-                    let searchRes = await fetch(`${API_BASE}/${LEADS_TABLE}/records?where=(phone,eq,${encodeURIComponent(rawPhone)})`, {
+                if (!leadToClear && normalizedPhone !== rawPhone) {
+                    searchRes = await fetch(`${API_BASE}/${LEADS_TABLE}/records?where=(phone,eq,${encodeURIComponent(normalizedPhone)})`, {
                         headers: { 'xc-token': XC_TOKEN }
                     });
-                    let searchData = await searchRes.json();
-                    let leadToClear = searchData.list && searchData.list[0];
-
-                    // If not found, try normalized phone
-                    if (!leadToClear && normalizedPhone !== rawPhone) {
-                        searchRes = await fetch(`${API_BASE}/${LEADS_TABLE}/records?where=(phone,eq,${encodeURIComponent(normalizedPhone)})`, {
-                            headers: { 'xc-token': XC_TOKEN }
-                        });
-                        searchData = await searchRes.json();
-                        leadToClear = searchData.list && searchData.list[0];
-                    }
-
-                    if (leadToClear && leadToClear.fecha_planificada) {
-                        const leadId = leadToClear.unique_id || leadToClear.Id || leadToClear.id;
-                        console.log(`[Persistence] Found lead ${leadId}. Clearing fecha_planificada...`);
-                        await fetch(`${API_BASE}/${LEADS_TABLE}/records`, {
-                            method: 'PATCH',
-                            headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
-                            body: JSON.stringify([{
-                                unique_id: leadId,
-                                fecha_planificada: null
-                            }])
-                        });
-                        console.log('[Persistence] Successfully cleared lead status.');
-                        setTimeout(fetchScheduledLeads, 500);
-                    } else {
-                        console.warn('[Persistence] No scheduled lead found for phone:', rawPhone, normalizedPhone);
-                    }
-                } catch (e) {
-                    console.error('[Persistence] Error clearing lead status:', e);
+                    searchData = await searchRes.json();
+                    leadToClear = searchData.list && searchData.list[0];
                 }
-            }, 2000);
+
+                if (leadToClear && leadToClear.fecha_planificada) {
+                    const leadId = leadToClear.unique_id;
+                    await fetch(`${API_BASE}/${LEADS_TABLE}/records`, {
+                        method: 'PATCH',
+                        headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+                        body: JSON.stringify([{ unique_id: leadId, fecha_planificada: null }])
+                    });
+                    log('✅', `Lead ${leadId} — fecha_planificada limpiada`, 'ok');
+                    setTimeout(fetchScheduledLeads, 500);
+                } else {
+                    log('ℹ️', 'No hay lead programado que limpiar para este teléfono');
+                }
+            } catch (e) {
+                log('⚠️', `Error limpiando lead: ${e.message}`, 'warn');
+            }
         } else {
-            throw new Error('Error al guardar log en NocoDB');
+            throw new Error(`NocoDB error ${logRes.status}: ${JSON.stringify(logBody)}`);
         }
 
     } catch (err) {
         console.error('Manual Call Error:', err);
-        feedback.textContent = `❌ Error: ${err.message}`;
-        feedback.className = 'feedback-error';
+        log('❌', `ERROR FATAL: ${err.message}`, 'err');
     } finally {
         btn.disabled = false;
-        btn.textContent = '🚀 Lanzar Llamada';
+        if (btn.textContent.includes('Iniciando') || btn.textContent.includes('Verificando')) {
+            btn.textContent = '🚀 Lanzar Llamada';
+        }
     }
 }
+
 
 function openManualModal() {
     document.getElementById('manual-call-modal').style.display = 'flex';
     document.getElementById('manual-lead-name').value = '';
     document.getElementById('manual-phone').value = '';
-    document.getElementById('manual-company').value = '';
+    document.getElementById('manual-locality').value = '';
     document.getElementById('manual-schedule-toggle').checked = false;
     document.getElementById('manual-schedule-fields').style.display = 'none';
     document.getElementById('trigger-call-btn').textContent = '🚀 Lanzar Llamada';
@@ -3599,7 +4690,7 @@ document.getElementById('apply-extraction-btn').addEventListener('click', async 
 
         // 4. Also update the Lead in the Leads table (best effort)
         try {
-            const LEADS_TABLE = 'mgot1kl4sglenym';
+
             const phoneCalled = activeDetailCall.phone_called;
             const normalizedSearch = normalizePhone(phoneCalled);
             const query = `(phone,eq,${encodeURIComponent(normalizedSearch)})`;
@@ -3737,6 +4828,11 @@ let realtimeCallTimers = {}; // callId -> start timestamp for duration tracking
 let realtimeIsPolling = false;
 let realtimeLastScan = null;
 
+// Network error backoff state
+let realtimeConsecutiveErrors = 0;
+let realtimeBackoffCycles = 0; // cycles to skip before retrying
+let realtimeCurrentSkip = 0;  // current skip counter
+
 // Background polling — always runs to update the tab badge
 let realtimeBgInterval = null;
 
@@ -3772,6 +4868,20 @@ function stopRealtimePolling() {
 }
 
 async function fetchRealtimeCalls(badgeOnly = false) {
+    // Skip if browser is offline
+    if (!navigator.onLine) {
+        const statusText = document.getElementById('realtime-status-text');
+        if (!badgeOnly && statusText) statusText.textContent = 'Sin conexión a internet';
+        return;
+    }
+
+    // Backoff: skip this cycle if we're in backoff mode
+    if (realtimeBackoffCycles > 0 && realtimeCurrentSkip < realtimeBackoffCycles) {
+        realtimeCurrentSkip++;
+        return;
+    }
+    realtimeCurrentSkip = 0;
+
     try {
         const statusText = document.getElementById('realtime-status-text');
         if (!badgeOnly && statusText) statusText.textContent = 'Escaneando...';
@@ -3790,6 +4900,14 @@ async function fetchRealtimeCalls(badgeOnly = false) {
         const rawCalls = await res.json();
         // Vapi may return an array or an object wrapping the array
         const calls = Array.isArray(rawCalls) ? rawCalls : (rawCalls?.results || rawCalls?.data || rawCalls?.list || []);
+
+        // ✅ Success — reset backoff
+        if (realtimeConsecutiveErrors > 0) {
+            console.log('[Realtime] Connection restored after', realtimeConsecutiveErrors, 'errors');
+        }
+        realtimeConsecutiveErrors = 0;
+        realtimeBackoffCycles = 0;
+        realtimeCurrentSkip = 0;
 
         // Categorize calls
         const activeCalls = calls.filter(c => c.status === 'in-progress');
@@ -3839,9 +4957,17 @@ async function fetchRealtimeCalls(badgeOnly = false) {
         renderRealtimeCalls(allLiveCalls, todayCalls);
 
     } catch (err) {
-        console.error('[Realtime] Error:', err);
+        realtimeConsecutiveErrors++;
+        // Exponential backoff: skip 1, 2, 4, 8, 12, 12... polling cycles
+        realtimeBackoffCycles = Math.min(12, Math.pow(2, realtimeConsecutiveErrors - 1));
+        realtimeCurrentSkip = 0;
+
+        // Only log the first error and then every 10th to avoid flooding
+        if (realtimeConsecutiveErrors === 1 || realtimeConsecutiveErrors % 10 === 0) {
+            console.warn(`[Realtime] Network error (x${realtimeConsecutiveErrors}), backing off ${realtimeBackoffCycles} cycles:`, err.message || err);
+        }
         const statusText = document.getElementById('realtime-status-text');
-        if (!badgeOnly && statusText) statusText.textContent = 'Error de conexión';
+        if (!badgeOnly && statusText) statusText.textContent = `Sin conexión (reintentando...)`;
     }
 }
 
@@ -4029,11 +5155,7 @@ async function fetchCallTranscript(callId) {
     }
 }
 
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
+// escapeHtml is defined at the top of the file (line 56)
 
 function getCallStatusLabel(status) {
     switch (status) {
@@ -4100,6 +5222,15 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 // Also start it immediately in case DOMContentLoaded already fired
 setTimeout(startRealtimeBgPolling, 3000);
+
+// Reset backoff instantly when browser regains connectivity
+window.addEventListener('online', () => {
+    console.log('[Realtime] Browser is back online, resetting backoff');
+    realtimeConsecutiveErrors = 0;
+    realtimeBackoffCycles = 0;
+    realtimeCurrentSkip = 0;
+    fetchRealtimeCalls(true);
+});
 
 // ══════════════════════════════════════════════════════════════
 // ── REPORTS / INFORMES DIARIOS ──
@@ -4238,6 +5369,41 @@ function renderReportCard(report) {
 document.getElementById('reports-refresh-btn')?.addEventListener('click', () => {
     reportsLoaded = false;
     loadReports();
+});
+
+document.getElementById('refresh-appointments-btn')?.addEventListener('click', () => {
+    loadAppointments();
+});
+
+// Calendar navigation
+document.getElementById('appt-cal-prev')?.addEventListener('click', () => {
+    calendarWeekOffset--;
+    loadAppointments();
+});
+document.getElementById('appt-cal-next')?.addEventListener('click', () => {
+    calendarWeekOffset++;
+    loadAppointments();
+});
+
+// New appointment modal
+document.getElementById('btn-new-appointment')?.addEventListener('click', () => {
+    document.getElementById('new-appointment-modal').style.display = 'flex';
+    // Pre-fill with tomorrow 10:00
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(10, 0, 0, 0);
+    const dtStr = tomorrow.getFullYear() + '-' +
+        String(tomorrow.getMonth() + 1).padStart(2, '0') + '-' +
+        String(tomorrow.getDate()).padStart(2, '0') + 'T10:00';
+    document.getElementById('new-appt-datetime').value = dtStr;
+});
+
+document.getElementById('close-appointment-modal')?.addEventListener('click', () => {
+    document.getElementById('new-appointment-modal').style.display = 'none';
+});
+
+document.getElementById('save-new-appointment-btn')?.addEventListener('click', () => {
+    saveManualAppointment();
 });
 
 document.getElementById('reports-run-btn')?.addEventListener('click', () => {
@@ -4388,8 +5554,125 @@ document.getElementById('agent-prompt-textarea')?.addEventListener('keydown', (e
     }
 });
 
-// ── Changelog / Registro de Cambios ──
+// ── Error Logs View ──
+let _errorLogsData = [];
+
+async function loadErrorLogs() {
+    const tbody = document.getElementById('errorlogs-table');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="6" class="loading">Cargando errores del servidor...</td></tr>';
+
+    try {
+        _errorLogsData = await getApiErrorsFromServer(200);
+        renderErrorLogs(_errorLogsData);
+        updateErrorLogKPIs(_errorLogsData);
+    } catch (e) {
+        console.error('[ErrorLogs] Error loading:', e);
+        tbody.innerHTML = '<tr><td colspan="6" class="loading">Error al cargar logs</td></tr>';
+    }
+}
+
+function updateErrorLogKPIs(logs) {
+    const total = logs.length;
+    const count404 = logs.filter(l => l.status === 404).length;
+    const count5xx = logs.filter(l => l.status >= 500 && l.status < 600).length;
+    const countOther = total - count404 - count5xx;
+
+    animateKPIValue('errorlogs-kpi-total', total);
+    animateKPIValue('errorlogs-kpi-404', count404);
+    animateKPIValue('errorlogs-kpi-500', count5xx);
+    animateKPIValue('errorlogs-kpi-network', countOther);
+}
+
+function renderErrorLogs(logs) {
+    const tbody = document.getElementById('errorlogs-table');
+    if (!tbody) return;
+
+    if (!logs || logs.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 40px; color: var(--text-secondary);">✅ Sin errores registrados</td></tr>';
+        return;
+    }
+
+    let html = '';
+    logs.forEach(log => {
+        const ts = log.timestamp || log.CreatedAt || '';
+        const dateStr = ts ? new Date(ts).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
+        const status = log.status || 0;
+        const method = escapeHtml(log.method || 'GET');
+        const context = escapeHtml(log.context || '');
+        const url = escapeHtml((log.url || '').replace(/https:\/\/[^/]+/, '...'));
+        const detail = escapeHtml((log.detail || log.status_text || '').substring(0, 120));
+
+        let statusBadge = '';
+        if (status === 0) {
+            statusBadge = '<span style="background: rgba(148,163,184,0.15); color: #94a3b8; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600;">NETWORK</span>';
+        } else if (status >= 500) {
+            statusBadge = `<span style="background: rgba(239,68,68,0.15); color: #f87171; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600;">${status}</span>`;
+        } else if (status === 404) {
+            statusBadge = `<span style="background: rgba(245,158,11,0.15); color: #fbbf24; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600;">${status}</span>`;
+        } else if (status >= 400) {
+            statusBadge = `<span style="background: rgba(251,146,60,0.15); color: #fb923c; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600;">${status}</span>`;
+        } else {
+            statusBadge = `<span style="background: rgba(59,130,246,0.15); color: #60a5fa; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600;">${status}</span>`;
+        }
+
+        const methodColors = { GET: '#60a5fa', POST: '#4ade80', PATCH: '#fbbf24', DELETE: '#f87171' };
+        const mColor = methodColors[method] || '#94a3b8';
+        const methodBadge = `<span style="background: ${mColor}22; color: ${mColor}; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600;">${method}</span>`;
+
+        html += `<tr>
+            <td style="white-space: nowrap; font-size: 12px; color: var(--text-secondary);">${dateStr}</td>
+            <td>${methodBadge}</td>
+            <td>${statusBadge}</td>
+            <td style="font-size: 12px; max-width: 160px; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(log.context || '')}">${context}</td>
+            <td style="font-size: 11px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; color: var(--text-secondary);" title="${escapeHtml(log.url || '')}">${url}</td>
+            <td style="font-size: 11px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; color: var(--text-secondary);" title="${escapeHtml(log.detail || log.status_text || '')}">${detail}</td>
+        </tr>`;
+    });
+
+    tbody.innerHTML = html;
+}
+
+// Error Logs event listeners
+document.getElementById('errorlogs-refresh-btn')?.addEventListener('click', loadErrorLogs);
+
+document.getElementById('errorlogs-download-btn')?.addEventListener('click', async () => {
+    try {
+        const logs = await getApiErrorsFromServer(500);
+        const blob = new Blob([JSON.stringify(logs, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `error_logs_${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+    } catch (e) {
+        alert('Error al descargar: ' + e.message);
+    }
+});
+
+document.getElementById('errorlogs-clear-btn')?.addEventListener('click', async () => {
+    if (!confirm('¿Borrar TODOS los logs de errores del servidor?')) return;
+    const btn = document.getElementById('errorlogs-clear-btn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Borrando...';
+    try {
+        await clearServerErrors();
+        clearApiErrors();
+        loadErrorLogs();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '🗑️ Borrar Todo';
+    }
+});
 const CHANGELOG_DATA = [
+    {
+        date: '2026-03-03',
+        entries: [
+            { type: 'feature', title: 'Sistema de Agendamiento de Citas', hours: 3, desc: 'Adaptación completa del sistema para gestión de visitas técnicas: nueva pestaña "Citas" con historial detallado, visualización de fechas de cita confirmadas, y refinamiento del prompt de Carolina para optimizar el cierre de agendamientos mediante el uso directo de bookAppointment.' },
+            { type: 'improvement', title: 'Visualización de datos confirmados en Citas', hours: 1, desc: 'Sincronización automática de campos "Fecha Cita" de NocoDB para mostrar la planificación real confirmada por la asistente virtual en el dashboard.' },
+        ]
+    },
     {
         date: '2026-02-26',
         entries: [

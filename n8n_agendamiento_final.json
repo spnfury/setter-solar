@@ -1,0 +1,391 @@
+{
+    "name": "Agendamiento Carolina Solar (v4 - HTTP Direct)",
+    "nodes": [
+        {
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "vapi-calendar",
+                "responseMode": "responseNode",
+                "options": {}
+            },
+            "id": "vapi-webhook",
+            "name": "Webhook Vapi",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 1.1,
+            "position": [
+                400,
+                300
+            ],
+            "webhookId": "vapi-calendar"
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "options": {
+                        "caseSensitive": true,
+                        "leftValue": "",
+                        "typeValidation": "loose",
+                        "version": 2
+                    },
+                    "conditions": [
+                        {
+                            "id": "is-tool-call",
+                            "leftValue": "={{ $json.body.message.type }}",
+                            "operator": {
+                                "operation": "equals",
+                                "type": "string"
+                            },
+                            "rightValue": "tool-calls"
+                        }
+                    ],
+                    "combinator": "and"
+                },
+                "options": {}
+            },
+            "id": "is-tool-call-filter",
+            "name": "Is Tool Call?",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2.2,
+            "position": [
+                600,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst msg = body.message;\nconst toolCall = msg.toolCalls[0];\nconst toolName = toolCall.function.name;\nconst args = typeof toolCall.function.arguments === 'string' ? JSON.parse(toolCall.function.arguments) : toolCall.function.arguments;\n\nlet startTime = args.datetime || null;\nlet endTime = null;\n\nif (toolName === 'bookAppointment' && startTime) {\n  if (!startTime.includes('+') && !startTime.includes('Z') && startTime.length <= 19) {\n    startTime = startTime + '+01:00';\n  }\n  if (startTime.endsWith('Z')) {\n    startTime = startTime.replace('Z', '+01:00');\n  }\n  try {\n    const startDate = new Date(startTime);\n    if (isNaN(startDate.getTime())) throw new Error('Invalid Date');\n    const endDate = new Date(startDate.getTime() + 60 * 60 * 1000);\n    const offsetMatch = startTime.match(/[+-]\\d{2}:\\d{2}$/);\n    const offset = offsetMatch ? offsetMatch[0] : '+01:00';\n    endTime = endDate.toISOString().replace('Z', '').split('.')[0] + offset;\n    startTime = startDate.toISOString().replace('Z', '').split('.')[0] + offset;\n  } catch(e) {\n    endTime = startTime;\n  }\n}\n\nreturn {\n  toolCallId: toolCall.id,\n  toolName: toolName,\n  datetime: startTime || null,\n  endDatetime: endTime || null,\n  clientName: args.clientName || 'Cliente desconocido',\n  clientPhone: args.clientPhone || '',\n  leadId: args.leadId || args.lead_id || '',\n  callId: msg.call?.id || ''\n};"
+            },
+            "id": "extract-data",
+            "name": "Extract Data",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                800,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "dataType": "string",
+                "value1": "={{ $json.toolName }}",
+                "rules": {
+                    "rules": [
+                        {
+                            "value2": "bookAppointment"
+                        },
+                        {
+                            "value2": "endCall",
+                            "output": 1
+                        },
+                        {
+                            "value2": "cancelAppointment",
+                            "output": 2
+                        }
+                    ]
+                }
+            },
+            "id": "tool-switch",
+            "name": "Switch Tool",
+            "type": "n8n-nodes-base.switch",
+            "typeVersion": 1,
+            "position": [
+                1000,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "https://optima-nocodb.vhsxer.easypanel.host/api/v2/tables/mh4cvunsnskuu4b/records",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "xc-token",
+                            "value": "vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "bodyParameters": {
+                    "parameters": [
+                        {
+                            "name": "Nombre Confirmado",
+                            "value": "={{ $json.clientName }}"
+                        },
+                        {
+                            "name": "Teléfono Confirmado",
+                            "value": "={{ $json.clientPhone }}"
+                        },
+                        {
+                            "name": "Fecha Cita",
+                            "value": "={{ $json.datetime }}"
+                        },
+                        {
+                            "name": "call_date",
+                            "value": "={{ $json.datetime }}"
+                        },
+                        {
+                            "name": "lead_name",
+                            "value": "={{ $json.clientName }}"
+                        },
+                        {
+                            "name": "lead_phone",
+                            "value": "={{ $json.clientPhone }}"
+                        },
+                        {
+                            "name": "Vapi Call ID",
+                            "value": "={{ $json.callId }}"
+                        }
+                    ]
+                },
+                "options": {}
+            },
+            "id": "nocodb-insert-http",
+            "name": "NocoDB Insert (HTTP)",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                1300,
+                300
+            ],
+            "onError": "continueRegularOutput"
+        },
+        {
+            "parameters": {
+                "method": "PATCH",
+                "url": "=https://optima-nocodb.vhsxer.easypanel.host/api/v2/tables/mf0wzufqcpi3bd1/records",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "xc-token",
+                            "value": "vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={{ JSON.stringify([{ Id: Number($json.leadId) || 0, status: 'Cita Concertada', notes: 'Asistenta agendó cita para el ' + $json.datetime }]) }}",
+                "options": {}
+            },
+            "id": "nocodb-update-lead-http",
+            "name": "NocoDB Update Lead (HTTP)",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                1500,
+                300
+            ],
+            "onError": "continueRegularOutput"
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={{ JSON.stringify({ results: [{ toolCallId: $json.toolCallId, result: $json.toolName === 'bookAppointment' ? 'Cita agendada con éxito' : ($json.toolName === 'cancelAppointment' ? 'Cita cancelada correctamente.' : 'OK') }] }) }}",
+                "options": {
+                    "responseHeaders": {
+                        "entries": [
+                            {
+                                "name": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ]
+                    }
+                }
+            },
+            "id": "webhook-response-success",
+            "name": "Respond Success",
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                1800,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={{ JSON.stringify({ results: [] }) }}",
+                "options": {
+                    "responseHeaders": {
+                        "entries": [
+                            {
+                                "name": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ]
+                    }
+                }
+            },
+            "id": "webhook-response-skip",
+            "name": "Respond Skip",
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                800,
+                500
+            ]
+        },
+        {
+            "parameters": {
+                "method": "GET",
+                "url": "=https://optima-nocodb.vhsxer.easypanel.host/api/v2/tables/mh4cvunsnskuu4b/records?limit=5&where=(Nombre Confirmado,eq,{{ encodeURIComponent($json.clientName) }})&sort=-CreatedAt",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "xc-token",
+                            "value": "vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d"
+                        }
+                    ]
+                },
+                "options": {}
+            },
+            "id": "cancel-find-http",
+            "name": "Find Appointment (HTTP)",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                1300,
+                600
+            ],
+            "onError": "continueRegularOutput"
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={{ JSON.stringify({ results: [{ toolCallId: $('Extract Data').first().json.toolCallId, result: 'Cita cancelada correctamente.' }] }) }}",
+                "options": {
+                    "responseHeaders": {
+                        "entries": [
+                            {
+                                "name": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ]
+                    }
+                }
+            },
+            "id": "cancel-respond",
+            "name": "Respond Cancel Success",
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                1500,
+                600
+            ]
+        }
+    ],
+    "connections": {
+        "Webhook Vapi": {
+            "main": [
+                [
+                    {
+                        "node": "Is Tool Call?",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Is Tool Call?": {
+            "main": [
+                [
+                    {
+                        "node": "Extract Data",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Respond Skip",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Data": {
+            "main": [
+                [
+                    {
+                        "node": "Switch Tool",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Switch Tool": {
+            "main": [
+                [
+                    {
+                        "node": "NocoDB Insert (HTTP)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Respond Success",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Find Appointment (HTTP)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "NocoDB Insert (HTTP)": {
+            "main": [
+                [
+                    {
+                        "node": "NocoDB Update Lead (HTTP)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "NocoDB Update Lead (HTTP)": {
+            "main": [
+                [
+                    {
+                        "node": "Respond Success",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Find Appointment (HTTP)": {
+            "main": [
+                [
+                    {
+                        "node": "Respond Cancel Success",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    }
+}
