@@ -18,7 +18,7 @@
         },
         {
             "parameters": {
-                "jsCode": "const body = $input.first().json.body || $input.first().json;\n\n// Handle Vapi Tool Call OR Call Update (ended call with structured data)\nlet args = {};\nlet callId = '';\n\nif (body.message) {\n  const msg = body.message;\n  callId = msg.call?.id || '';\n  \n  if (msg.type === 'tool-calls') {\n    const toolCall = msg.toolCalls[0];\n    args = typeof toolCall.function.arguments === 'string' \n      ? JSON.parse(toolCall.function.arguments) \n      : toolCall.function.arguments;\n  } else if (msg.type === 'call-update' && msg.call?.status === 'ended') {\n    // This comes from the analysisPlan / structuredDataExtraction\n    args = msg.call.analysis?.structuredData || {};\n  }\n}\n\nreturn {\n  datetime: args.datetime,\n  clientName: args.clientName,\n  clientPhone: args.clientPhone,\n  leadId: args.leadId || args.lead_id,\n  callId: callId || args.callId\n};"
+                "jsCode": "const body = $input.first().json.body || $input.first().json;\n\n// Handle Vapi Tool Call OR Call Update (ended call with structured data)\nlet args = {};\nlet callId = '';\nlet toolCallId = '';\n\nif (body.message) {\n  const msg = body.message;\n  callId = msg.call?.id || '';\n  \n  if (msg.type === 'tool-calls') {\n    const toolCall = msg.toolCalls[0];\n    toolCallId = toolCall.id || '';\n    args = typeof toolCall.function.arguments === 'string' \n      ? JSON.parse(toolCall.function.arguments) \n      : toolCall.function.arguments;\n  } else if (msg.type === 'call-update' && msg.call?.status === 'ended') {\n    args = msg.call.analysis?.structuredData || {};\n  }\n}\n\nreturn {\n  datetime: args.datetime,\n  clientName: args.clientName,\n  clientPhone: args.clientPhone,\n  leadId: args.leadId || args.lead_id,\n  callId: callId || args.callId,\n  toolCallId: toolCallId\n};"
             },
             "id": "extract-data",
             "name": "Extract Data",
@@ -146,7 +146,7 @@
         {
             "parameters": {
                 "respondWith": "json",
-                "responseBody": "{\n  \"success\": true,\n  \"message\": \"Cita agendada correctamente\",\n  \"datetime\": \"{{ $json.datetime }}\"\n}",
+                "responseBody": "={{ JSON.stringify({ results: [{ toolCallId: $('Extract Data').item.json.toolCallId, result: 'Cita agendada correctamente para ' + $json.datetime }] }) }}",
                 "options": {}
             },
             "id": "webhook-response",
@@ -205,7 +205,7 @@
         },
         {
             "parameters": {
-                "jsCode": "// Extract leads from NocoDB response and filter only those that are due now\nconst input = $input.first().json;\nconst leads = input.list || [];\nconst now = new Date();\n\nconst dueLeads = leads.filter(lead => {\n  if (!lead.fecha_planificada) return false;\n  const plannedDate = new Date(lead.fecha_planificada);\n  return !isNaN(plannedDate.getTime()) && plannedDate <= now;\n});\n\nif (dueLeads.length === 0) {\n  return []; // No leads due — stop execution\n}\n\n// Return each due lead as a separate item for batch processing\nreturn dueLeads.map(lead => {\n  // Normalize phone number\n  let phone = String(lead.phone || '').replace(/\\D/g, '');\n  if (phone && !phone.startsWith('34')) phone = '34' + phone;\n  if (phone) phone = '+' + phone;\n\n  return {\n    json: {\n      leadId: lead.unique_id,\n      name: lead.name || 'Cliente',\n      phone: phone,\n      address: lead.address || 'su localidad',\n      email: lead.email || '',\n      assistant_id: lead.assistant_id || '',\n      fecha_planificada: lead.fecha_planificada\n    }\n  };\n});"
+                "jsCode": "// Extract leads from NocoDB response and filter only those that are due now\nconst input = $input.first().json;\nconst leads = input.list || [];\nconst now = new Date();\n\nconst dueLeads = leads.filter(lead => {\n  if (!lead.fecha_planificada) return false;\n  const plannedDate = new Date(lead.fecha_planificada);\n  return !isNaN(plannedDate.getTime()) && plannedDate <= now;\n});\n\nif (dueLeads.length === 0) {\n  return []; // No leads due — stop execution\n}\n\n// Return each due lead as a separate item for batch processing\nreturn dueLeads.map(lead => {\n  // Normalize phone number\n  let phone = String(lead.phone || '').replace(/\\D/g, '');\n  if (phone && !phone.startsWith('34')) phone = '34' + phone;\n  if (phone) phone = '+' + phone;\n\n  return {\n    json: {\n      leadId: lead.unique_id,\n      name: lead.name || 'Cliente',\n      phone: phone,\n      address: lead.address || lead.Localidad || 'su localidad',\n      email: lead.email || '',\n      assistant_id: lead.assistant_id || '',\n      fecha_planificada: lead.fecha_planificada\n    }\n  };\n});"
             },
             "id": "filter-due-leads",
             "name": "Filter Due Leads",
@@ -235,7 +235,7 @@
                 },
                 "sendBody": true,
                 "specifyBody": "json",
-                "jsonBody": "={{ JSON.stringify({ customer: { number: $json.phone }, assistantId: $json.assistant_id || 'f3359bb0-7bc4-45c7-9a02-ca4793cc5d48', phoneNumberId: 'e774df77-8fd0-4a17-a815-2acf8b6e3c2b', assistantOverrides: { variableValues: { nombre: $json.name, empresa: $json.name, ciudad: $json.address, tel_contacto: $json.phone, correo_cliente: $json.email } } }) }}",
+                "jsonBody": "={{ JSON.stringify({ customer: { number: $json.phone }, assistantId: $json.assistant_id || 'f3359bb0-7bc4-45c7-9a02-ca4793cc5d48', phoneNumberId: 'e774df77-8fd0-4a17-a815-2acf8b6e3c2b', assistantOverrides: { variableValues: { nombre: $json.name, empresa: $json.name, ciudad: $json.address, tel_contacto: $json.phone, correo_cliente: $json.email, leadId: $json.leadId } } }) }}",
                 "options": {}
             },
             "id": "launch-vapi-call",
