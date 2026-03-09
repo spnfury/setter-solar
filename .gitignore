@@ -3,3 +3,5 @@ dist/
 config.js
 .vercel/
 *.json.bak
+.vercel
+.env*.local
