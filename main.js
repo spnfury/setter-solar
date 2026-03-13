@@ -265,7 +265,7 @@ async function fetchData(tableId, limit = 200) {
         allRecords = allRecords.concat(records);
         if (records.length < batchSize || data.pageInfo?.isLastPage !== false) break;
         offset += batchSize;
-        if (allRecords.length >= 5000) break; // Safety limit
+        if (allRecords.length >= 500) break; // Limit to last 500 records for performance
     }
     return allRecords;
 }
