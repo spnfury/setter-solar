@@ -53,6 +53,11 @@ export default defineConfig({
                 target: 'https://api.vapi.ai',
                 changeOrigin: true,
                 rewrite: (path) => path.replace(/^\/vapi-api/, '')
+            },
+            '/nocodb-api': {
+                target: 'https://optima-nocodb.vhsxer.easypanel.host',
+                changeOrigin: true,
+                rewrite: (path) => path.replace(/^\/nocodb-api/, '')
             }
         }
     }

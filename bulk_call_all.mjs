@@ -16,7 +16,7 @@ const CALL_LOGS_TABLE = 'm73w58ba47ifkrx';
 const XC_TOKEN = 'vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d';
 
 const VAPI_API_KEY = '0594f41c-e836-425d-aaa2-1c5b7d9e506e';
-const VAPI_PHONE_NUMBER_ID = 'e774df77-8fd0-4a17-a815-2acf8b6e3c2b';
+const VAPI_PHONE_NUMBER_ID = 'b3b47ab7-b74b-46b9-bf72-0f82d6731f56';
 
 const ASSISTANTS = {
     carolina: 'f3359bb0-7bc4-45c7-9a02-ca4793cc5d48',
@@ -231,6 +231,14 @@ async function main() {
     console.log(`   🔒 Max concurrent calls: ${MAX_CONCURRENT_CALLS}`);
     if (DRY_RUN) console.log('   ⚠️  MODO DRY RUN — No se harán llamadas reales');
     console.log('═'.repeat(60));
+
+    // 🛡️ SECURITY: Run preflight checks (business hours, concurrency, max daily calls)
+    const { runPreflightChecks } = await import('./preflight_check.mjs');
+    const preflight = await runPreflightChecks();
+    if (!preflight.allowed) {
+        console.error('\n🛑 SCRIPT BLOQUEADO POR PREFLIGHT CHECKS.');
+        process.exit(1);
+    }
 
     // Check current concurrency
     const initialActive = await getActiveCallCount();

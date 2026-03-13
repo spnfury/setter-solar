@@ -190,7 +190,7 @@
         {
             "parameters": {
                 "respondWith": "json",
-                "responseBody": "={{ JSON.stringify({ results: [{ toolCallId: $json.toolCallId, result: $json.toolName === 'bookAppointment' ? 'Cita agendada con éxito' : ($json.toolName === 'cancelAppointment' ? 'Cita cancelada correctamente.' : 'OK') }] }) }}",
+                "responseBody": "={{ JSON.stringify({ results: [{ toolCallId: $('Extract Data').item.json.toolCallId, result: $('Extract Data').item.json.toolName === 'bookAppointment' ? 'Cita agendada con éxito' : ($('Extract Data').item.json.toolName === 'cancelAppointment' ? 'Cita cancelada correctamente.' : 'OK') }] }) }}",
                 "options": {
                     "responseHeaders": {
                         "entries": [
@@ -263,7 +263,7 @@
         {
             "parameters": {
                 "respondWith": "json",
-                "responseBody": "={{ JSON.stringify({ results: [{ toolCallId: $('Extract Data').first().json.toolCallId, result: 'Cita cancelada correctamente.' }] }) }}",
+                "responseBody": "={{ JSON.stringify({ results: [{ toolCallId: $('Extract Data').item.json.toolCallId, result: 'Cita cancelada correctamente.' }] }) }}",
                 "options": {
                     "responseHeaders": {
                         "entries": [
