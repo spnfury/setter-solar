@@ -1,5 +1,41 @@
-// ── Configuration loaded from config.js (gitignored) ──
-const { API_BASE, LEADS_TABLE, CALL_LOGS_TABLE, CONFIRMED_TABLE, ERROR_LOGS_TABLE, XC_TOKEN, VAPI_API_KEY, OPENAI_API_KEY, VAPI_PHONE_NUMBER_ID, VAPI_ASSISTANT_ID, ZADARMA_KEY, ZADARMA_SECRET, ZADARMA_FROM_NUMBER } = window.APP_CONFIG;
+// ── Auth & Dynamic Configuration ──
+const AUTH_URL = 'https://n8n.srv889387.hstgr.cloud/webhook/setter-solar-auth';
+const VERIFY_URL = 'https://n8n.srv889387.hstgr.cloud/webhook/setter-solar-verify';
+
+// These will be populated dynamically after login
+let API_BASE = '', LEADS_TABLE = '', CALL_LOGS_TABLE = '', CONFIRMED_TABLE = '',
+    ERROR_LOGS_TABLE = '', XC_TOKEN = '', VAPI_API_KEY = '', OPENAI_API_KEY = '',
+    VAPI_PHONE_NUMBER_ID = '', VAPI_ASSISTANT_ID = '', VAPI_PUBLIC_KEY = '',
+    ZADARMA_KEY = '', ZADARMA_SECRET = '', ZADARMA_FROM_NUMBER = '';
+
+let _userConfig = {}; // Store the full user config
+
+function applyConfig(config) {
+    _userConfig = config;
+    API_BASE = config.api_base || '';
+    LEADS_TABLE = config.leads_table || '';
+    CALL_LOGS_TABLE = config.call_logs_table || '';
+    CONFIRMED_TABLE = config.confirmed_table || '';
+    ERROR_LOGS_TABLE = config.error_logs_table || '';
+    XC_TOKEN = config.xc_token || '';
+    VAPI_API_KEY = config.vapi_api_key || '';
+    VAPI_PUBLIC_KEY = config.vapi_public_key || '';
+    OPENAI_API_KEY = config.openai_api_key || '';
+    VAPI_PHONE_NUMBER_ID = config.vapi_phone_number_id || '';
+    VAPI_ASSISTANT_ID = config.vapi_assistant_id || '';
+    ZADARMA_KEY = config.zadarma_key || '';
+    ZADARMA_SECRET = config.zadarma_secret || '';
+    ZADARMA_FROM_NUMBER = config.zadarma_from_number || '';
+
+    // Update UI with branding
+    const companyEl = document.getElementById('header-company-name');
+    if (companyEl) companyEl.textContent = config.company_name || 'Dashboard';
+    if (config.logo_url) {
+        const logoEl = document.getElementById('header-logo');
+        if (logoEl) logoEl.src = config.logo_url;
+    }
+    document.title = (config.company_name || 'Dashboard') + ' — Panel de Control';
+}
 
 let currentCalls = [];
 let allCalls = [];
@@ -3879,16 +3915,55 @@ document.getElementById('detail-modal').addEventListener('click', (e) => {
     if (e.target.id === 'detail-modal' || e.target.classList.contains('modal')) closeModal();
 });
 
-document.getElementById('login-form').addEventListener('submit', (e) => {
+document.getElementById('login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const ADMIN_PASSWORD = (window.APP_CONFIG && window.APP_CONFIG.DASHBOARD_PASSWORD) || 'solar2025';
+    const email = document.getElementById('email-input').value.trim();
     const password = document.getElementById('password-input').value;
-    if (password === ADMIN_PASSWORD) {
-        localStorage.setItem('dashboard_auth', 'true');
-        showDashboard();
-    } else {
-        document.getElementById('auth-error').style.display = 'block';
+    const remember = document.getElementById('remember-me').checked;
+    const errorEl = document.getElementById('auth-error');
+    const btn = document.getElementById('login-btn');
+
+    errorEl.style.display = 'none';
+    btn.disabled = true;
+    btn.textContent = '⏳ Verificando...';
+
+    try {
+        const res = await fetch(AUTH_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password })
+        });
+        const data = await res.json();
+
+        if (data.success && data.config) {
+            // Store session
+            const storage = remember ? localStorage : sessionStorage;
+            storage.setItem('setter_auth_token', data.token);
+            storage.setItem('setter_auth_config', JSON.stringify(data.config));
+
+            applyConfig(data.config);
+            showDashboard();
+        } else {
+            errorEl.textContent = data.error || 'Error de autenticación';
+            errorEl.style.display = 'block';
+        }
+    } catch (err) {
+        console.error('Login error:', err);
+        errorEl.textContent = 'Error de conexión. Inténtalo de nuevo.';
+        errorEl.style.display = 'block';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Entrar';
     }
+});
+
+// Logout
+document.getElementById('logout-btn')?.addEventListener('click', () => {
+    localStorage.removeItem('setter_auth_token');
+    localStorage.removeItem('setter_auth_config');
+    sessionStorage.removeItem('setter_auth_token');
+    sessionStorage.removeItem('setter_auth_config');
+    location.reload();
 });
 
 function showDashboard() {
@@ -3921,9 +3996,47 @@ function showDashboard() {
     switchToTab(activeHash);
 }
 
-function checkAuth() {
-    if (localStorage.getItem('dashboard_auth') === 'true') {
-        showDashboard();
+async function checkAuth() {
+    // Try to restore session from storage
+    const token = localStorage.getItem('setter_auth_token') || sessionStorage.getItem('setter_auth_token');
+    const cachedConfig = localStorage.getItem('setter_auth_config') || sessionStorage.getItem('setter_auth_config');
+
+    if (!token) return; // No session, show login
+
+    // Apply cached config immediately for instant load
+    if (cachedConfig) {
+        try {
+            applyConfig(JSON.parse(cachedConfig));
+            showDashboard();
+        } catch (e) { /* ignore parse errors */ }
+    }
+
+    // Verify token in background (refresh config if needed)
+    try {
+        const res = await fetch(VERIFY_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token })
+        });
+        const data = await res.json();
+
+        if (data.success && data.config) {
+            applyConfig(data.config);
+            // Update cached config
+            const storage = localStorage.getItem('setter_auth_token') ? localStorage : sessionStorage;
+            storage.setItem('setter_auth_config', JSON.stringify(data.config));
+            if (!cachedConfig) showDashboard(); // Show if not already shown
+        } else {
+            // Token invalid — clear and show login
+            localStorage.removeItem('setter_auth_token');
+            localStorage.removeItem('setter_auth_config');
+            sessionStorage.removeItem('setter_auth_token');
+            sessionStorage.removeItem('setter_auth_config');
+            if (cachedConfig) location.reload(); // Reload to show login
+        }
+    } catch (err) {
+        console.warn('Token verify failed (offline?):', err);
+        // If we have cached config, continue with it (offline mode)
     }
 }
 

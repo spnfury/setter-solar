@@ -1,0 +1,188 @@
+{
+  "name": "Setter Solar Auth",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "setter-solar-auth",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "auth-webhook",
+      "name": "Auth Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "setter-solar-auth"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst email = (body.email || '').trim().toLowerCase();\nconst password = body.password || '';\n\nif (!email || !password) {\n  return [{ json: { error: 'Email y contraseña requeridos', status: 400, _skip: true } }];\n}\n\nconst lookupUrl = `https://optima-nocodb.vhsxer.easypanel.host/api/v2/tables/mkb040wimke95sl/records?where=(Email,eq,${email})&limit=1`;\n\nreturn [{ json: { email, password, lookupUrl } }];\n"
+      },
+      "id": "extract-creds",
+      "name": "Extract Credentials",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.lookupUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "xc-token",
+              "value": "vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "lookup-user",
+      "name": "Lookup User",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const creds = $('Extract Credentials').first().json;\n\nif (creds._skip || creds.error) {\n  return [{ json: { error: creds.error, status: creds.status || 401 } }];\n}\n\nconst httpResponse = $input.first().json;\nconst users = httpResponse.list || [];\n\nif (users.length === 0) {\n  return [{ json: { error: 'Credenciales inválidas', status: 401 } }];\n}\n\nconst u = users[0];\n\nif (u['Password Hash'] !== creds.password) {\n  return [{ json: { error: 'Credenciales inválidas', status: 401 } }];\n}\n\nif (!u['Is Active']) {\n  return [{ json: { error: 'Cuenta desactivada', status: 403 } }];\n}\n\nconst tokenPayload = {\n  email: u['Email'],\n  company: u['Company Name'],\n  exp: Date.now() + (7 * 24 * 60 * 60 * 1000)\n};\nconst token = Buffer.from(JSON.stringify(tokenPayload)).toString('base64');\n\nreturn [{\n  json: {\n    success: true,\n    token,\n    config: {\n      company_name: u['Company Name'] || 'Dashboard',\n      logo_url: u['Logo URL'] || '',\n      api_base: u['API Base'],\n      leads_table: u['Leads Table'],\n      call_logs_table: u['Call Logs Table'],\n      confirmed_table: u['Confirmed Table'],\n      error_logs_table: u['Error Logs Table'],\n      xc_token: u['XC Token'],\n      vapi_api_key: u['Vapi API Key'],\n      vapi_public_key: u['Vapi Public Key'],\n      vapi_assistant_id: u['Vapi Assistant ID'],\n      vapi_phone_number_id: u['Vapi Phone Number ID'],\n      zadarma_key: u['Zadarma Key'],\n      zadarma_secret: u['Zadarma Secret'],\n      zadarma_from_number: u['Zadarma From Number'],\n      openai_api_key: u['OpenAI API Key'],\n      n8n_webhook_base: u['N8N Webhook Base'] || ''\n    },\n    status: 200\n  }\n}];\n"
+      },
+      "id": "validate-build",
+      "name": "Validate & Build Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "options": {
+          "responseCode": "={{ $json.status || 200 }}"
+        },
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.error ? { error: $json.error } : { success: $json.success, token: $json.token, config: $json.config }) }}"
+      },
+      "id": "respond-auth",
+      "name": "Respond Auth",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1080, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "setter-solar-verify",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "verify-webhook",
+      "name": "Verify Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 600],
+      "webhookId": "setter-solar-verify"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst token = body.token || '';\n\nif (!token) {\n  return [{ json: { error: 'Token requerido', status: 401, _skip: true } }];\n}\n\ntry {\n  const payload = JSON.parse(Buffer.from(token, 'base64').toString('utf8'));\n  if (payload.exp && payload.exp < Date.now()) {\n    return [{ json: { error: 'Sesión expirada', status: 401, _skip: true } }];\n  }\n  const lookupUrl = `https://optima-nocodb.vhsxer.easypanel.host/api/v2/tables/mkb040wimke95sl/records?where=(Email,eq,${payload.email})&limit=1`;\n  return [{ json: { email: payload.email, lookupUrl, _skip: false } }];\n} catch (e) {\n  return [{ json: { error: 'Token inválido', status: 401, _skip: true } }];\n}\n"
+      },
+      "id": "decode-token",
+      "name": "Decode Token",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 600]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.lookupUrl || 'https://optima-nocodb.vhsxer.easypanel.host/api/v2/tables/mkb040wimke95sl/records?limit=0' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "xc-token",
+              "value": "vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "lookup-user-verify",
+      "name": "Lookup User (Verify)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [640, 600]
+    },
+    {
+      "parameters": {
+        "jsCode": "const tokenData = $('Decode Token').first().json;\n\nif (tokenData._skip || tokenData.error) {\n  return [{ json: { error: tokenData.error, status: tokenData.status || 401 } }];\n}\n\nconst httpResponse = $input.first().json;\nconst users = httpResponse.list || [];\n\nif (users.length === 0 || !users[0]['Is Active']) {\n  return [{ json: { error: 'Sesión inválida', status: 401 } }];\n}\n\nconst u = users[0];\n\nreturn [{\n  json: {\n    success: true,\n    config: {\n      company_name: u['Company Name'] || 'Dashboard',\n      logo_url: u['Logo URL'] || '',\n      api_base: u['API Base'],\n      leads_table: u['Leads Table'],\n      call_logs_table: u['Call Logs Table'],\n      confirmed_table: u['Confirmed Table'],\n      error_logs_table: u['Error Logs Table'],\n      xc_token: u['XC Token'],\n      vapi_api_key: u['Vapi API Key'],\n      vapi_public_key: u['Vapi Public Key'],\n      vapi_assistant_id: u['Vapi Assistant ID'],\n      vapi_phone_number_id: u['Vapi Phone Number ID'],\n      zadarma_key: u['Zadarma Key'],\n      zadarma_secret: u['Zadarma Secret'],\n      zadarma_from_number: u['Zadarma From Number'],\n      openai_api_key: u['OpenAI API Key'],\n      n8n_webhook_base: u['N8N Webhook Base'] || ''\n    },\n    status: 200\n  }\n}];\n"
+      },
+      "id": "build-verify-resp",
+      "name": "Build Verify Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 600]
+    },
+    {
+      "parameters": {
+        "options": {
+          "responseCode": "={{ $json.status || 200 }}"
+        },
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.error ? { error: $json.error } : { success: $json.success, config: $json.config }) }}"
+      },
+      "id": "respond-verify",
+      "name": "Respond Verify",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1080, 600]
+    }
+  ],
+  "connections": {
+    "Auth Webhook": {
+      "main": [[{ "node": "Extract Credentials", "type": "main", "index": 0 }]]
+    },
+    "Extract Credentials": {
+      "main": [[{ "node": "Lookup User", "type": "main", "index": 0 }]]
+    },
+    "Lookup User": {
+      "main": [[{ "node": "Validate & Build Response", "type": "main", "index": 0 }]]
+    },
+    "Validate & Build Response": {
+      "main": [[{ "node": "Respond Auth", "type": "main", "index": 0 }]]
+    },
+    "Verify Webhook": {
+      "main": [[{ "node": "Decode Token", "type": "main", "index": 0 }]]
+    },
+    "Decode Token": {
+      "main": [[{ "node": "Lookup User (Verify)", "type": "main", "index": 0 }]]
+    },
+    "Lookup User (Verify)": {
+      "main": [[{ "node": "Build Verify Response", "type": "main", "index": 0 }]]
+    },
+    "Build Verify Response": {
+      "main": [[{ "node": "Respond Verify", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
