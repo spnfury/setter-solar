@@ -965,9 +965,39 @@ async function enrichCallsFromVapi(calls) {
             if (!res.ok) {
                 logApiError({ url: `https://api.vapi.ai/call/${call.vapi_call_id}`, method: 'GET', status: res.status, statusText: res.statusText, context: 'enrichCallsFromVapi', detail: `callId=${call.vapi_call_id}` });
                 if (res.status === 429) break; // Stop if rate limited
+                // If Vapi returns 404 (call not found) or other client errors, the call never completed — mark as Error
+                if (res.status === 404 || res.status === 402 || res.status === 403) {
+                    const errorLabel = res.status === 404 ? 'Llamada no encontrada' : 'Error de cuenta (sin saldo)';
+                    call.evaluation = 'Error';
+                    call.ended_reason = errorLabel;
+                    call.duration_seconds = 0;
+                    // Update NocoDB
+                    fetch(`${API_BASE}/${CALL_LOGS_TABLE}/records`, {
+                        method: 'PATCH',
+                        headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+                        body: JSON.stringify([{ id: call.id || call.Id, evaluation: 'Error', ended_reason: errorLabel, duration_seconds: 0 }])
+                    }).catch(err => console.warn('Failed to update error call log:', err));
+                    updated = true;
+                }
                 continue;
             }
             const vapiData = await res.json();
+
+            // If call has a failed status, mark as Error
+            if (vapiData.status === 'failed') {
+                const failReason = vapiData.endedReason || 'Error desconocido';
+                call.evaluation = 'Error';
+                call.ended_reason = mapEndedReason(failReason);
+                call.duration_seconds = 0;
+                fetch(`${API_BASE}/${CALL_LOGS_TABLE}/records`, {
+                    method: 'PATCH',
+                    headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+                    body: JSON.stringify([{ id: call.id || call.Id, evaluation: 'Error', ended_reason: mapEndedReason(failReason), duration_seconds: 0 }])
+                }).catch(err => console.warn('Failed to update failed call log:', err));
+                updated = true;
+                await new Promise(r => setTimeout(r, 400));
+                continue;
+            }
 
             if (vapiData.status !== 'ended') continue; // Call still in progress
 
