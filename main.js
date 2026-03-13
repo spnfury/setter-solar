@@ -3341,9 +3341,12 @@ async function loadData(skipEnrichment = false) {
                 if (confirmed) tr.classList.add('confirmed-row');
 
                 // Detect unenriched rows (data not yet fetched from Vapi)
-                const isUnenriched = !call.evaluation || call.evaluation === 'Pendiente' ||
+                // Only show "loading" for calls that CAN be enriched (have a real Vapi ID)
+                const hasRealVapiId = vapiId && vapiId !== 'unknown' && vapiId !== '-' && vapiId.length >= 36;
+                const isUnenriched = hasRealVapiId && (
+                    !call.evaluation || call.evaluation === 'Pendiente' ||
                     call.ended_reason === 'Call Initiated' || call.ended_reason === 'call_initiated' ||
-                    call.ended_reason === 'Bulk Call Trigger' || call.ended_reason === 'Manual Trigger';
+                    call.ended_reason === 'Bulk Call Trigger' || call.ended_reason === 'Manual Trigger');
                 if (isUnenriched) tr.classList.add('unenriched-row');
 
                 // Add retry styling class
