@@ -3153,11 +3153,9 @@ async function loadData(skipEnrichment = false) {
             fetchConfirmedData()
         ]);
 
-        // Safety filter: exclude phantom call_logs (failed Vapi calls logged with unknown ID)
-        const calls = rawCalls.filter(c => c.vapi_call_id && c.vapi_call_id !== 'unknown');
-        if (rawCalls.length !== calls.length) {
-            console.warn(`[Dashboard] Filtered out ${rawCalls.length - calls.length} phantom call_logs (vapi_call_id=unknown)`);
-        }
+        // Show all call logs (including those with vapi_call_id='unknown' — these are real calls
+        // that were logged before the Vapi API returned the actual call ID)
+        const calls = rawCalls;
 
         // Auto-evaluate confirmed calls that have no evaluation yet
         calls.forEach(call => {
