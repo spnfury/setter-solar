@@ -71,6 +71,7 @@
             <div class="nav-tab" data-tab="test">🧪 Test</div>
             <div class="nav-tab" data-tab="agents">🤖 Agentes</div>
             <div class="nav-tab" data-tab="errorlogs">🚨 Error Logs</div>
+            <div class="nav-tab" data-tab="admin" id="nav-tab-admin" style="display:none;">⚙️ Admin</div>
         </nav>
 
         <!-- Tab 1: Dashboard View -->
@@ -886,6 +887,181 @@
                 </table>
             </div>
         </div>
+
+        <!-- Tab: Admin Panel (only visible for admin users) -->
+        <div id="view-admin" class="view-content">
+            <div class="leads-header">
+                <div class="leads-header-info">
+                    <h2 style="margin: 0; font-size: 20px; display: flex; align-items: center; gap: 10px;">⚙️ Gestión de Usuarios</h2>
+                    <p style="color: var(--text-secondary); font-size: 13px; margin-top: 4px;">Crea, edita y gestiona las cuentas de usuario y su configuración.</p>
+                </div>
+                <div class="header-actions" style="gap: 10px;">
+                    <button class="btn-add-lead" id="btn-add-user">➕ Nuevo Usuario</button>
+                    <button class="refresh-btn" id="admin-refresh-btn">🔄 Actualizar</button>
+                </div>
+            </div>
+
+            <!-- Admin KPI -->
+            <div class="leads-kpi-section" id="admin-kpi-section">
+                <div class="leads-kpi-card leads-kpi-total">
+                    <div class="leads-kpi-icon">👥</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="admin-kpi-total"><span class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">Total Usuarios</div>
+                    </div>
+                </div>
+                <div class="leads-kpi-card" style="border-left: 3px solid #22c55e;">
+                    <div class="leads-kpi-icon">🟢</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="admin-kpi-active" style="color: #4ade80;"><span class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">Activos</div>
+                    </div>
+                </div>
+                <div class="leads-kpi-card" style="border-left: 3px solid #f59e0b;">
+                    <div class="leads-kpi-icon">👑</div>
+                    <div class="leads-kpi-info">
+                        <div class="leads-kpi-value" id="admin-kpi-admins" style="color: #fbbf24;"><span class="skeleton-value sm"></span></div>
+                        <div class="leads-kpi-label">Administradores</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Users Grid -->
+            <div id="admin-users-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 16px; margin-top: 16px;">
+                <div class="loading" style="grid-column: 1 / -1; text-align: center; padding: 40px; color: var(--text-secondary);">Cargando usuarios...</div>
+            </div>
+        </div>
+
+        <!-- Modal: User Edit / Create -->
+        <div class="modal" id="user-edit-modal">
+            <div class="modal-content" style="max-width: 680px; max-height: 85vh; overflow-y: auto;">
+                <button class="close-modal" id="close-user-modal">×</button>
+                <div class="modal-header">
+                    <h2 id="user-modal-title">➕ Nuevo Usuario</h2>
+                    <p style="color: var(--text-secondary); font-size: 13px; margin-top: 4px;">Configura todos los parámetros de la cuenta.</p>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 20px; margin-top: 20px;">
+                    <!-- Account -->
+                    <div class="glass-effect" style="padding: 16px; border-radius: 12px;">
+                        <div style="font-weight: 700; font-size: 14px; margin-bottom: 12px; color: var(--accent);">👤 Cuenta</div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                            <div class="form-group">
+                                <label class="sched-config-label">Email</label>
+                                <input type="email" id="user-email" class="sched-input" placeholder="user@company.com">
+                            </div>
+                            <div class="form-group">
+                                <label class="sched-config-label">Contraseña</label>
+                                <input type="text" id="user-password" class="sched-input" placeholder="••••••">
+                            </div>
+                            <div class="form-group">
+                                <label class="sched-config-label">Nombre de Empresa</label>
+                                <input type="text" id="user-company" class="sched-input" placeholder="Mi Empresa Solar">
+                            </div>
+                            <div class="form-group">
+                                <label class="sched-config-label">Logo URL (opcional)</label>
+                                <input type="text" id="user-logo" class="sched-input" placeholder="https://...">
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 20px; margin-top: 12px;">
+                            <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer;">
+                                <input type="checkbox" id="user-is-active" checked> Activo
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer;">
+                                <input type="checkbox" id="user-is-admin"> Administrador
+                            </label>
+                        </div>
+                    </div>
+                    <!-- NocoDB -->
+                    <div class="glass-effect" style="padding: 16px; border-radius: 12px;">
+                        <div style="font-weight: 700; font-size: 14px; margin-bottom: 12px; color: #60a5fa;">🗄️ NocoDB</div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                            <div class="form-group" style="grid-column: 1 / -1;">
+                                <label class="sched-config-label">API Base URL</label>
+                                <input type="text" id="user-api-base" class="sched-input" placeholder="https://nocodb.example.com/api/v2/tables">
+                            </div>
+                            <div class="form-group" style="grid-column: 1 / -1;">
+                                <label class="sched-config-label">XC Token</label>
+                                <input type="text" id="user-xc-token" class="sched-input" placeholder="Token de API NocoDB">
+                            </div>
+                            <div class="form-group">
+                                <label class="sched-config-label">Leads Table ID</label>
+                                <input type="text" id="user-leads-table" class="sched-input" placeholder="mXXXXXXX">
+                            </div>
+                            <div class="form-group">
+                                <label class="sched-config-label">Call Logs Table ID</label>
+                                <input type="text" id="user-calllogs-table" class="sched-input" placeholder="mXXXXXXX">
+                            </div>
+                            <div class="form-group">
+                                <label class="sched-config-label">Confirmed Table ID</label>
+                                <input type="text" id="user-confirmed-table" class="sched-input" placeholder="mXXXXXXX">
+                            </div>
+                            <div class="form-group">
+                                <label class="sched-config-label">Error Logs Table ID</label>
+                                <input type="text" id="user-errorlogs-table" class="sched-input" placeholder="mXXXXXXX">
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Vapi -->
+                    <div class="glass-effect" style="padding: 16px; border-radius: 12px;">
+                        <div style="font-weight: 700; font-size: 14px; margin-bottom: 12px; color: #a78bfa;">📞 Vapi</div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                            <div class="form-group">
+                                <label class="sched-config-label">API Key (Private)</label>
+                                <input type="text" id="user-vapi-key" class="sched-input" placeholder="UUID">
+                            </div>
+                            <div class="form-group">
+                                <label class="sched-config-label">Public Key</label>
+                                <input type="text" id="user-vapi-public" class="sched-input" placeholder="UUID">
+                            </div>
+                            <div class="form-group">
+                                <label class="sched-config-label">Assistant ID</label>
+                                <input type="text" id="user-vapi-assistant" class="sched-input" placeholder="UUID">
+                            </div>
+                            <div class="form-group">
+                                <label class="sched-config-label">Phone Number ID</label>
+                                <input type="text" id="user-vapi-phone" class="sched-input" placeholder="UUID">
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Zadarma -->
+                    <div class="glass-effect" style="padding: 16px; border-radius: 12px;">
+                        <div style="font-weight: 700; font-size: 14px; margin-bottom: 12px; color: #34d399;">📱 Zadarma</div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;">
+                            <div class="form-group">
+                                <label class="sched-config-label">API Key</label>
+                                <input type="text" id="user-zadarma-key" class="sched-input">
+                            </div>
+                            <div class="form-group">
+                                <label class="sched-config-label">Secret</label>
+                                <input type="text" id="user-zadarma-secret" class="sched-input">
+                            </div>
+                            <div class="form-group">
+                                <label class="sched-config-label">Nº Origen</label>
+                                <input type="text" id="user-zadarma-number" class="sched-input" placeholder="34XXXXXXXXX">
+                            </div>
+                        </div>
+                    </div>
+                    <!-- AI & N8N -->
+                    <div class="glass-effect" style="padding: 16px; border-radius: 12px;">
+                        <div style="font-weight: 700; font-size: 14px; margin-bottom: 12px; color: #fb923c;">🤖 IA & Automatización</div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                            <div class="form-group">
+                                <label class="sched-config-label">OpenAI API Key</label>
+                                <input type="text" id="user-openai-key" class="sched-input" placeholder="sk-...">
+                            </div>
+                            <div class="form-group">
+                                <label class="sched-config-label">N8N Webhook Base</label>
+                                <input type="text" id="user-n8n-base" class="sched-input" placeholder="https://n8n.example.com">
+                            </div>
+                        </div>
+                    </div>
+                    <input type="hidden" id="user-edit-email-original">
+                    <button id="save-user-btn" class="sched-btn sched-btn-execute" style="width: 100%;">💾 Guardar Usuario</button>
+                    <div id="user-form-feedback" style="text-align: center; font-size: 13px; min-height: 20px;"></div>
+                </div>
+            </div>
+        </div>
+
     </div>
 
     <!-- Modal para Detalle -->

@@ -35,6 +35,10 @@ function applyConfig(config) {
         if (logoEl) logoEl.src = config.logo_url;
     }
     document.title = (config.company_name || 'Dashboard') + ' — Panel de Control';
+
+    // Show admin tab if user is admin
+    const adminTab = document.getElementById('nav-tab-admin');
+    if (adminTab) adminTab.style.display = config.is_admin ? '' : 'none';
 }
 
 let currentCalls = [];
@@ -2056,6 +2060,7 @@ function switchToTab(target) {
         if (target === 'agents') loadAgentPrompt();
         if (target === 'test') loadData();
         if (target === 'errorlogs') loadErrorLogs();
+        if (target === 'admin') loadAdminUsers();
     } catch (e) {
         console.warn('[switchToTab] Deferred init, some handlers not ready yet:', e.message);
     }
@@ -6032,3 +6037,225 @@ function renderChangelog() {
     container.innerHTML = html;
 }
 
+
+// ═══════════════════════════════════════════════════════════════
+// ══  ADMIN PANEL — User Management CRUD
+// ═══════════════════════════════════════════════════════════════
+
+const ADMIN_USERS_TABLE = 'mkb040wimke95sl';
+const ADMIN_NOCODB_BASE = 'https://optima-nocodb.vhsxer.easypanel.host/api/v2/tables';
+const ADMIN_XC_TOKEN = 'vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d';
+
+let _adminUsers = [];
+
+async function loadAdminUsers() {
+    try {
+        const res = await fetch(`${ADMIN_NOCODB_BASE}/${ADMIN_USERS_TABLE}/records?limit=200`, {
+            headers: { 'xc-token': ADMIN_XC_TOKEN }
+        });
+        const data = await res.json();
+        _adminUsers = data.list || [];
+        renderAdminKPI();
+        renderAdminUsersGrid();
+    } catch (err) {
+        console.error('Admin: Error loading users:', err);
+    }
+}
+
+function renderAdminKPI() {
+    const el = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
+    el('admin-kpi-total', _adminUsers.length);
+    el('admin-kpi-active', _adminUsers.filter(u => u['Is Active']).length);
+    el('admin-kpi-admins', _adminUsers.filter(u => u['Is Admin']).length);
+}
+
+function renderAdminUsersGrid() {
+    const grid = document.getElementById('admin-users-grid');
+    if (!grid) return;
+
+    if (_adminUsers.length === 0) {
+        grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text-secondary);">No hay usuarios registrados</div>';
+        return;
+    }
+
+    grid.innerHTML = _adminUsers.map(u => {
+        const active = u['Is Active'];
+        const admin = u['Is Admin'];
+        const company = u['Company Name'] || '—';
+        const email = u['Email'] || '—';
+        const hasVapi = !!u['Vapi API Key'];
+        const hasZadarma = !!u['Zadarma Key'];
+        const hasNocoDB = !!u['XC Token'];
+        const statusColor = active ? '#22c55e' : '#ef4444';
+        const statusText = active ? 'Activo' : 'Inactivo';
+
+        return `
+            <div class="glass-effect" style="padding: 20px; border-radius: 14px; border-left: 4px solid ${statusColor}; position: relative;">
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px;">
+                    <div>
+                        <div style="font-weight: 700; font-size: 16px; display: flex; align-items: center; gap: 8px;">
+                            ${company}
+                            ${admin ? '<span style="background: rgba(251,191,36,0.15); color: #fbbf24; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600;">👑 Admin</span>' : ''}
+                        </div>
+                        <div style="color: var(--text-secondary); font-size: 13px; margin-top: 4px;">${email}</div>
+                    </div>
+                    <span style="background: rgba(${active ? '34,197,94' : '239,68,68'},0.15); color: ${statusColor}; padding: 4px 10px; border-radius: 8px; font-size: 12px; font-weight: 600;">${statusText}</span>
+                </div>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px;">
+                    <span style="background: ${hasNocoDB ? 'rgba(96,165,250,0.15)' : 'rgba(148,163,184,0.1)'}; color: ${hasNocoDB ? '#60a5fa' : '#64748b'}; padding: 3px 10px; border-radius: 6px; font-size: 11px;">🗄️ NocoDB</span>
+                    <span style="background: ${hasVapi ? 'rgba(167,139,250,0.15)' : 'rgba(148,163,184,0.1)'}; color: ${hasVapi ? '#a78bfa' : '#64748b'}; padding: 3px 10px; border-radius: 6px; font-size: 11px;">📞 Vapi</span>
+                    <span style="background: ${hasZadarma ? 'rgba(52,211,153,0.15)' : 'rgba(148,163,184,0.1)'}; color: ${hasZadarma ? '#34d399' : '#64748b'}; padding: 3px 10px; border-radius: 6px; font-size: 11px;">📱 Zadarma</span>
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <button class="refresh-btn" style="flex:1; padding: 8px;" onclick="openUserModal('${email.replace(/'/g, "\\'")}')">✏️ Editar</button>
+                    <button class="refresh-btn" style="padding: 8px; background: rgba(${active ? '239,68,68' : '34,197,94'},0.1); color: ${active ? '#ef4444' : '#22c55e'}; border-color: rgba(${active ? '239,68,68' : '34,197,94'},0.2);" onclick="toggleUserActive('${email.replace(/'/g, "\\'")}')">⏻ ${active ? 'Desactivar' : 'Activar'}</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function openUserModal(email = '') {
+    const modal = document.getElementById('user-edit-modal');
+    const title = document.getElementById('user-modal-title');
+    const feedback = document.getElementById('user-form-feedback');
+    feedback.textContent = '';
+
+    if (email) {
+        // Edit mode
+        const u = _adminUsers.find(usr => usr['Email'] === email);
+        if (!u) return;
+        title.textContent = '✏️ Editar Usuario';
+        document.getElementById('user-edit-email-original').value = email;
+        document.getElementById('user-email').value = u['Email'] || '';
+        document.getElementById('user-email').readOnly = true;
+        document.getElementById('user-password').value = u['Password Hash'] || '';
+        document.getElementById('user-company').value = u['Company Name'] || '';
+        document.getElementById('user-logo').value = u['Logo URL'] || '';
+        document.getElementById('user-is-active').checked = !!u['Is Active'];
+        document.getElementById('user-is-admin').checked = !!u['Is Admin'];
+        document.getElementById('user-api-base').value = u['API Base'] || '';
+        document.getElementById('user-xc-token').value = u['XC Token'] || '';
+        document.getElementById('user-leads-table').value = u['Leads Table'] || '';
+        document.getElementById('user-calllogs-table').value = u['Call Logs Table'] || '';
+        document.getElementById('user-confirmed-table').value = u['Confirmed Table'] || '';
+        document.getElementById('user-errorlogs-table').value = u['Error Logs Table'] || '';
+        document.getElementById('user-vapi-key').value = u['Vapi API Key'] || '';
+        document.getElementById('user-vapi-public').value = u['Vapi Public Key'] || '';
+        document.getElementById('user-vapi-assistant').value = u['Vapi Assistant ID'] || '';
+        document.getElementById('user-vapi-phone').value = u['Vapi Phone Number ID'] || '';
+        document.getElementById('user-zadarma-key').value = u['Zadarma Key'] || '';
+        document.getElementById('user-zadarma-secret').value = u['Zadarma Secret'] || '';
+        document.getElementById('user-zadarma-number').value = u['Zadarma From Number'] || '';
+        document.getElementById('user-openai-key').value = u['OpenAI API Key'] || '';
+        document.getElementById('user-n8n-base').value = u['N8N Webhook Base'] || '';
+    } else {
+        // Create mode
+        title.textContent = '➕ Nuevo Usuario';
+        document.getElementById('user-edit-email-original').value = '';
+        document.getElementById('user-email').readOnly = false;
+        ['user-email','user-password','user-company','user-logo','user-api-base','user-xc-token',
+         'user-leads-table','user-calllogs-table','user-confirmed-table','user-errorlogs-table',
+         'user-vapi-key','user-vapi-public','user-vapi-assistant','user-vapi-phone',
+         'user-zadarma-key','user-zadarma-secret','user-zadarma-number',
+         'user-openai-key','user-n8n-base'].forEach(id => document.getElementById(id).value = '');
+        document.getElementById('user-is-active').checked = true;
+        document.getElementById('user-is-admin').checked = false;
+    }
+
+    modal.style.display = 'flex';
+}
+window.openUserModal = openUserModal;
+
+async function saveUser() {
+    const feedback = document.getElementById('user-form-feedback');
+    const email = document.getElementById('user-email').value.trim();
+    const originalEmail = document.getElementById('user-edit-email-original').value;
+    const isEdit = !!originalEmail;
+
+    if (!email) { feedback.textContent = '⚠️ Email requerido'; return; }
+
+    const record = {
+        'Email': email,
+        'Password Hash': document.getElementById('user-password').value,
+        'Company Name': document.getElementById('user-company').value,
+        'Logo URL': document.getElementById('user-logo').value,
+        'Is Active': document.getElementById('user-is-active').checked,
+        'Is Admin': document.getElementById('user-is-admin').checked,
+        'API Base': document.getElementById('user-api-base').value,
+        'XC Token': document.getElementById('user-xc-token').value,
+        'Leads Table': document.getElementById('user-leads-table').value,
+        'Call Logs Table': document.getElementById('user-calllogs-table').value,
+        'Confirmed Table': document.getElementById('user-confirmed-table').value,
+        'Error Logs Table': document.getElementById('user-errorlogs-table').value,
+        'Vapi API Key': document.getElementById('user-vapi-key').value,
+        'Vapi Public Key': document.getElementById('user-vapi-public').value,
+        'Vapi Assistant ID': document.getElementById('user-vapi-assistant').value,
+        'Vapi Phone Number ID': document.getElementById('user-vapi-phone').value,
+        'Zadarma Key': document.getElementById('user-zadarma-key').value,
+        'Zadarma Secret': document.getElementById('user-zadarma-secret').value,
+        'Zadarma From Number': document.getElementById('user-zadarma-number').value,
+        'OpenAI API Key': document.getElementById('user-openai-key').value,
+        'N8N Webhook Base': document.getElementById('user-n8n-base').value
+    };
+
+    feedback.textContent = '⏳ Guardando...';
+
+    try {
+        if (isEdit) {
+            await fetch(`${ADMIN_NOCODB_BASE}/${ADMIN_USERS_TABLE}/records`, {
+                method: 'PATCH',
+                headers: { 'xc-token': ADMIN_XC_TOKEN, 'Content-Type': 'application/json' },
+                body: JSON.stringify(record)
+            });
+        } else {
+            await fetch(`${ADMIN_NOCODB_BASE}/${ADMIN_USERS_TABLE}/records`, {
+                method: 'POST',
+                headers: { 'xc-token': ADMIN_XC_TOKEN, 'Content-Type': 'application/json' },
+                body: JSON.stringify(record)
+            });
+        }
+
+        feedback.textContent = '✅ Usuario guardado correctamente';
+        setTimeout(() => {
+            document.getElementById('user-edit-modal').style.display = 'none';
+            loadAdminUsers();
+        }, 800);
+    } catch (err) {
+        console.error('Admin: Error saving user:', err);
+        feedback.textContent = '❌ Error al guardar: ' + err.message;
+    }
+}
+
+async function toggleUserActive(email) {
+    const u = _adminUsers.find(usr => usr['Email'] === email);
+    if (!u) return;
+    const newState = !u['Is Active'];
+    const action = newState ? 'activar' : 'desactivar';
+    if (!confirm(`¿Seguro que quieres ${action} a ${u['Company Name'] || email}?`)) return;
+
+    try {
+        await fetch(`${ADMIN_NOCODB_BASE}/${ADMIN_USERS_TABLE}/records`, {
+            method: 'PATCH',
+            headers: { 'xc-token': ADMIN_XC_TOKEN, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 'Email': email, 'Is Active': newState })
+        });
+        await loadAdminUsers();
+    } catch (err) {
+        console.error('Admin: Error toggling user:', err);
+    }
+}
+window.toggleUserActive = toggleUserActive;
+
+// Admin event listeners
+(function initAdminPanel() {
+    document.getElementById('btn-add-user')?.addEventListener('click', () => openUserModal());
+    document.getElementById('admin-refresh-btn')?.addEventListener('click', () => loadAdminUsers());
+    document.getElementById('save-user-btn')?.addEventListener('click', () => saveUser());
+    document.getElementById('close-user-modal')?.addEventListener('click', () => {
+        document.getElementById('user-edit-modal').style.display = 'none';
+    });
+    document.getElementById('user-edit-modal')?.addEventListener('click', (e) => {
+        if (e.target.id === 'user-edit-modal') document.getElementById('user-edit-modal').style.display = 'none';
+    });
+})();
