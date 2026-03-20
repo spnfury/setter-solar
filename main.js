@@ -1274,17 +1274,32 @@ async function enrichCallsFromVapi(calls) {
                 call.evaluation = 'Error';
                 call.ended_reason = mapEndedReason(failReason);
                 call.duration_seconds = 0;
-                fetch(`${API_BASE}/${CALL_LOGS_TABLE}/records`, {
+                call.call_disposition = 'Error Técnico';
+                await fetch(`${API_BASE}/${CALL_LOGS_TABLE}/records`, {
                     method: 'PATCH',
                     headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
-                    body: JSON.stringify([{ Id: call.id || call.Id, evaluation: 'Error', ended_reason: mapEndedReason(failReason), duration_seconds: 0 }])
+                    body: JSON.stringify([{ Id: call.id || call.Id, evaluation: 'Error', ended_reason: mapEndedReason(failReason), duration_seconds: 0, call_disposition: 'Error Técnico' }])
                 }).catch(err => console.warn('Failed to update failed call log:', err));
                 updated = true;
                 await new Promise(r => setTimeout(r, 400));
                 continue;
             }
 
-            if (vapiData.status !== 'ended') continue; // Call still in progress
+            if (vapiData.status !== 'ended') {
+                const ageMinutes = (Date.now() - new Date(call.call_time || call.CreatedAt).getTime()) / 60000;
+                if (ageMinutes > 30) {
+                    call.evaluation = 'Error';
+                    call.ended_reason = 'Atascado en Vapi';
+                    call.call_disposition = 'Error Técnico';
+                    await fetch(`${API_BASE}/${CALL_LOGS_TABLE}/records`, {
+                        method: 'PATCH',
+                        headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+                        body: JSON.stringify([{ Id: call.id || call.Id, evaluation: 'Error', ended_reason: 'Atascado en Vapi', call_disposition: 'Error Técnico' }])
+                    });
+                    updated = true;
+                }
+                continue; // Call still in progress
+            }
 
             // Calculate duration from messages or timestamps
             let duration = 0;
@@ -1377,7 +1392,7 @@ async function enrichCallsFromVapi(calls) {
                 updateData.recording_url = vapiData.artifact.recordingUrl;
             }
 
-            fetch(`${API_BASE}/${CALL_LOGS_TABLE}/records`, {
+            await fetch(`${API_BASE}/${CALL_LOGS_TABLE}/records`, {
                 method: 'PATCH',
                 headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
                 body: JSON.stringify([updateData])
@@ -3695,11 +3710,13 @@ async function loadData(skipEnrichment = false) {
             setTimeout(async () => {
                 try {
                     const wasUpdated = await enrichCallsFromVapi(calls);
-                    if (wasUpdated) {
-                        loadData(true); // Re-render with enriched data, but skip further enrichment cycles
-                    }
-                } finally {
                     isEnriching = false;
+                    if (wasUpdated) {
+                        loadData(false); // Re-render and allow next batch
+                    }
+                } catch(e) { 
+                    isEnriching = false;
+                    console.warn('Enrich error:', e); 
                 }
             }, 100);
         }

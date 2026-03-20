@@ -21,7 +21,7 @@ const API_BASE = 'https://optima-nocodb.vhsxer.easypanel.host/api/v2/tables';
 const CALL_LOGS_TABLE = 'm73w58ba47ifkrx';
 const CONFIRMED_TABLE = 'mh4cvunsnskuu4b';
 const LEADS_TABLE = 'mf0wzufqcpi3bd1';
-const REPORTS_TABLE = 'matif11dcltlmn6'; // Asumiendo que esta es igual o debes validarla; si no hay tabla nueva de informes, déjala como matif11dcltlmn6 o coméntalo.
+const REPORTS_TABLE = 'mcy344zpzachr5f'; // Asumiendo que esta es igual o debes validarla; si no hay tabla nueva de informes, déjala como matif11dcltlmn6 o coméntalo.
 const XC_TOKEN = 'vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d';
 
 const VAPI_API_KEY = '0594f41c-e836-425d-aaa2-1c5b7d9e506e';

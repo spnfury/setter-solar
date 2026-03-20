@@ -24,7 +24,7 @@
 const API_BASE        = 'https://optima-nocodb.vhsxer.easypanel.host/api/v2/tables';
 const LEADS_TABLE     = 'mf0wzufqcpi3bd1';
 const CALL_LOGS_TABLE = 'm73w58ba47ifkrx';
-const REPORTS_TABLE   = 'matif11dcltlmn6';
+const REPORTS_TABLE   = 'mcy344zpzachr5f';
 const XC_TOKEN        = 'vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d';
 
 const VAPI_API_KEY        = '0594f41c-e836-425d-aaa2-1c5b7d9e506e';
