@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Analyze mid-length calls (5-30s) to find AI drop-off pattern
-const XC_TOKEN = 'jx3uoKeVaidZLF7M0skVb9pV6yvNsam0Hu-Vfeww';
-const VAPI_KEY = '852080ba-ce7c-4778-b218-bf718613a2b6';
-const API_BASE = 'https://nocodb.srv889387.hstgr.cloud/api/v2/tables';
-const CALL_LOGS = 'm013en5u2cyu30j';
+const XC_TOKEN = 'vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d';
+const VAPI_KEY = '0594f41c-e836-425d-aaa2-1c5b7d9e506e';
+const API_BASE = 'https://optima-nocodb.vhsxer.easypanel.host/api/v2/tables';
+const CALL_LOGS = 'm73w58ba47ifkrx';
 
 async function main() {
     // Fetch more records
@@ -18,7 +18,7 @@ async function main() {
     }
 
     // Get calls from last 7 days with duration 3-60s (the interesting drop-off range)
-    const cutoff = new Date('2026-02-10');
+    const cutoff = new Date('2026-03-01');
     const calls = all.filter(c => {
         const d = new Date(c.call_time || c.CreatedAt);
         if (d < cutoff) return false;

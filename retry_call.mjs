@@ -18,14 +18,14 @@
 
 const VAPI_API_KEY = '0594f41c-e836-425d-aaa2-1c5b7d9e506e';
 const ASSISTANT_ID = 'f3359bb0-7bc4-45c7-9a02-ca4793cc5d48';
-const PHONE_NUMBER_ID = 'e774df77-8fd0-4a17-a815-2acf8b6e3c2b';
+const PHONE_NUMBER_ID = 'ee153e9d-ece6-4469-a634-70eaa6e083c4';
 
 const NOCODB_BASE = 'https://optima-nocodb.vhsxer.easypanel.host/api/v2/tables';
 const LEADS_TABLE = 'mf0wzufqcpi3bd1';
 const CALL_LOGS_TABLE = 'm73w58ba47ifkrx';
 const XC_TOKEN = 'vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d';
 
-const MAX_CONCURRENT_CALLS = 10;
+const MAX_CONCURRENT_CALLS = 3;  // ⚠️ SIP trunk safe limit
 
 function formatPhone(phone) {
     let p = String(phone || '').replace(/\D/g, '');
@@ -190,18 +190,22 @@ ${context.transcript || 'No disponible'}
 }
 
 /**
- * Check active call count
+ * Check active call count and active phone numbers
  */
-async function getActiveCallCount() {
+async function getActiveCallInfo() {
     try {
         const res = await fetch('https://api.vapi.ai/call?limit=100', {
             headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
         });
-        if (!res.ok) return -1;
+        if (!res.ok) return { count: -1, activePhones: new Set() };
         const calls = await res.json();
-        return (Array.isArray(calls) ? calls : [])
-            .filter(c => ['queued', 'ringing', 'in-progress'].includes(c.status)).length;
-    } catch { return -1; }
+        const activeCalls = (Array.isArray(calls) ? calls : [])
+            .filter(c => ['queued', 'ringing', 'in-progress'].includes(c.status));
+        return {
+            count: activeCalls.length,
+            activePhones: new Set(activeCalls.map(c => c.customer?.number).filter(Boolean))
+        };
+    } catch { return { count: -1, activePhones: new Set() }; }
 }
 
 async function main() {
@@ -266,14 +270,18 @@ async function main() {
     console.log(`\n💬 Primer mensaje de la rellamada:`);
     console.log(`   "${retryFirstMessage}"`);
 
-    // Check concurrency
-    const activeCount = await getActiveCallCount();
-    if (activeCount >= MAX_CONCURRENT_CALLS) {
-        console.error(`\n🚫 Límite de concurrencia alcanzado: ${activeCount}/${MAX_CONCURRENT_CALLS}`);
+    // Check concurrency and active phone
+    const callInfo = await getActiveCallInfo();
+    if (callInfo.count >= MAX_CONCURRENT_CALLS) {
+        console.error(`\n🚫 Límite de concurrencia alcanzado: ${callInfo.count}/${MAX_CONCURRENT_CALLS}`);
         process.exit(1);
     }
-    if (activeCount >= 0) {
-        console.log(`\n📊 Llamadas activas: ${activeCount}/${MAX_CONCURRENT_CALLS}`);
+    if (callInfo.activePhones.has(customerPhone)) {
+        console.error(`\n🚫 El teléfono ${customerPhone} ya tiene una llamada activa. Espera a que termine.`);
+        process.exit(1);
+    }
+    if (callInfo.count >= 0) {
+        console.log(`\n📊 Llamadas activas: ${callInfo.count}/${MAX_CONCURRENT_CALLS}`);
     }
 
     // Get current assistant to build overrides
@@ -310,7 +318,10 @@ async function main() {
                 variableValues: {
                     nombre: context.customerName || 'Cliente',
                     empresa: previousCall.customer?.name || '',
-                    tel_contacto: customerPhone
+                    tel_contacto: customerPhone,
+                    ciudad: previousCall.assistantOverrides?.variableValues?.ciudad || 'tu zona',
+                    fecha_hoy: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Madrid' }),
+                    dia_semana: new Date().toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid', weekday: 'long' })
                 }
             }
         })

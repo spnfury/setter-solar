@@ -13,10 +13,10 @@ const CALL_LOGS_TABLE = 'm73w58ba47ifkrx';
 const XC_TOKEN = 'vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d';
 const VAPI_API_KEY = '0594f41c-e836-425d-aaa2-1c5b7d9e506e';
 const ASSISTANT_ID = 'f3359bb0-7bc4-45c7-9a02-ca4793cc5d48';
-const PHONE_NUMBER_ID = 'e774df77-8fd0-4a17-a815-2acf8b6e3c2b';
+const PHONE_NUMBER_ID = 'ee153e9d-ece6-4469-a634-70eaa6e083c4';
 
-const MAX_CONCURRENT_CALLS = 10;
-const DELAY_BETWEEN_CALLS = 10; // seconds between calls
+const MAX_CONCURRENT_CALLS = 3;  // ⚠️ SIP trunk safe limit (max 10, use 3 for safety)
+const DELAY_BETWEEN_CALLS = 15; // seconds between calls — prevents SIP 503 errors
 const CONCURRENCY_CHECK_INTERVAL = 15; // seconds to wait when at max concurrency
 const MAX_CONCURRENCY_RETRIES = 40; // max retries waiting for a slot (40 * 15s = 10min max)
 
@@ -31,58 +31,65 @@ function sleep(ms) {
 }
 
 /**
- * Query Vapi API for the number of currently active calls.
+ * Query Vapi API for the number of currently active calls and their phone numbers.
  * Active = queued, ringing, or in-progress.
  */
-async function getActiveCallCount() {
+async function getActiveCallInfo() {
     try {
         const res = await fetch('https://api.vapi.ai/call?limit=100', {
             headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
         });
         if (!res.ok) {
             console.warn(`   ⚠️ Error checking active calls: HTTP ${res.status}`);
-            return -1; // Unknown — treat cautiously
+            return { count: -1, activePhones: new Set() };
         }
         const calls = await res.json();
         const activeCalls = (Array.isArray(calls) ? calls : []).filter(c =>
             ['queued', 'ringing', 'in-progress'].includes(c.status)
         );
-        return activeCalls.length;
+        const activePhones = new Set(activeCalls.map(c => c.customer?.number).filter(Boolean));
+        return { count: activeCalls.length, activePhones };
     } catch (err) {
         console.warn(`   ⚠️ Error checking active calls: ${err.message}`);
-        return -1;
+        return { count: -1, activePhones: new Set() };
     }
 }
 
 /**
  * Wait until there's a free slot (active calls < MAX_CONCURRENT_CALLS).
- * Returns true if a slot is available, false if we timed out.
+ * Also checks that the target phone is not already in an active call.
+ * Returns { available: true/false, reason? }
  */
-async function waitForAvailableSlot() {
+async function waitForAvailableSlot(targetPhone) {
     for (let attempt = 0; attempt < MAX_CONCURRENCY_RETRIES; attempt++) {
-        const activeCount = await getActiveCallCount();
+        const info = await getActiveCallInfo();
 
-        if (activeCount === -1) {
-            // Could not check — wait a bit and try again, but don't skip the limit
+        if (info.count === -1) {
             console.log(`   ⚠️ Could not verify concurrency. Waiting ${CONCURRENCY_CHECK_INTERVAL}s to retry...`);
             await sleep(CONCURRENCY_CHECK_INTERVAL * 1000);
             continue;
         }
 
-        if (activeCount < MAX_CONCURRENT_CALLS) {
+        // Check if target phone is already in an active call
+        if (targetPhone && info.activePhones.has(targetPhone)) {
+            console.log(`   🚫 Phone ${targetPhone} already has an active call. Skipping.`);
+            return { available: false, reason: 'phone_active' };
+        }
+
+        if (info.count < MAX_CONCURRENT_CALLS) {
             if (attempt > 0) {
-                console.log(`   ✅ Slot available! Active calls: ${activeCount}/${MAX_CONCURRENT_CALLS}`);
+                console.log(`   ✅ Slot available! Active calls: ${info.count}/${MAX_CONCURRENT_CALLS}`);
             }
-            return true;
+            return { available: true };
         }
 
         const now = new Date().toLocaleTimeString('es-ES', { timeZone: 'Europe/Madrid', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        console.log(`   🚫 [${now}] Concurrency limit reached: ${activeCount}/${MAX_CONCURRENT_CALLS} active calls. Waiting ${CONCURRENCY_CHECK_INTERVAL}s... (attempt ${attempt + 1}/${MAX_CONCURRENCY_RETRIES})`);
+        console.log(`   🚫 [${now}] Concurrency limit reached: ${info.count}/${MAX_CONCURRENT_CALLS} active calls. Waiting ${CONCURRENCY_CHECK_INTERVAL}s... (attempt ${attempt + 1}/${MAX_CONCURRENCY_RETRIES})`);
         await sleep(CONCURRENCY_CHECK_INTERVAL * 1000);
     }
 
     console.error(`   ❌ Timed out waiting for a free slot after ${MAX_CONCURRENCY_RETRIES} attempts.`);
-    return false;
+    return { available: false, reason: 'timeout' };
 }
 
 async function main() {
@@ -135,6 +142,7 @@ async function main() {
     let success = 0;
     let errors = 0;
     let skipped = 0;
+    const calledPhones = new Set(); // Track phones called in this session
 
     for (let i = 0; i < eligible.length; i++) {
         const lead = eligible[i];
@@ -143,13 +151,25 @@ async function main() {
         const address = lead.address || 'su localidad';
         const email = lead.email || '';
 
-        // ⚠️ CRITICAL: Wait for available concurrency slot before launching
-        const slotAvailable = await waitForAvailableSlot();
-        if (!slotAvailable) {
-            console.log(`⏭️  Skipping ${name} — could not get a free slot.`);
+        // ⚠️ RULE: Never call the same number twice in one session
+        if (calledPhones.has(phone)) {
+            console.log(`⏭️  Skipping ${name} (${phone}) — same number already called in this session.`);
             skipped++;
             continue;
         }
+
+        // ⚠️ CRITICAL: Wait for available concurrency slot + check phone not active
+        const slot = await waitForAvailableSlot(phone);
+        if (!slot.available) {
+            const reason = slot.reason === 'phone_active'
+                ? `Phone ${phone} already in active call`
+                : 'Could not get a free slot';
+            console.log(`⏭️  Skipping ${name} — ${reason}`);
+            skipped++;
+            continue;
+        }
+
+        calledPhones.add(phone);
 
         const now = new Date().toLocaleTimeString('es-ES', { timeZone: 'Europe/Madrid', hour: '2-digit', minute: '2-digit', second: '2-digit' });
         process.stdout.write(`[${i + 1}/${eligible.length}] ${now} ${name.substring(0, 35).padEnd(35)} ${phone} → `);
@@ -179,7 +199,9 @@ async function main() {
                                     empresa: name,
                                     ciudad: address,
                                     tel_contacto: phone,
-                                    correo_cliente: email
+                                    correo_cliente: email,
+                                    fecha_hoy: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Madrid' }),
+                                    dia_semana: new Date().toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid', weekday: 'long' })
                                 }
                             }
                         })

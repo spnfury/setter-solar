@@ -1000,6 +1000,92 @@ input[type="password"]:focus {
     box-shadow: 0 0 8px rgba(59, 130, 246, 0.2);
 }
 
+/* ── Disposition Badges ── */
+.disposition-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border-radius: 16px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+    transition: all 0.2s ease;
+    letter-spacing: 0.2px;
+}
+
+.disposition-interesado {
+    background: rgba(34, 197, 94, 0.12) !important;
+    color: #4ade80 !important;
+    border: 1px solid rgba(34, 197, 94, 0.3) !important;
+}
+
+.disposition-cita {
+    background: rgba(245, 158, 11, 0.12) !important;
+    color: #fbbf24 !important;
+    border: 1px solid rgba(245, 158, 11, 0.3) !important;
+}
+
+.disposition-no-interesado {
+    background: rgba(239, 68, 68, 0.12) !important;
+    color: #f87171 !important;
+    border: 1px solid rgba(239, 68, 68, 0.3) !important;
+}
+
+.disposition-callback {
+    background: rgba(59, 130, 246, 0.12) !important;
+    color: #60a5fa !important;
+    border: 1px solid rgba(59, 130, 246, 0.3) !important;
+}
+
+.disposition-no-contacto {
+    background: rgba(100, 116, 139, 0.12) !important;
+    color: #94a3b8 !important;
+    border: 1px solid rgba(100, 116, 139, 0.3) !important;
+}
+
+.disposition-insuficiente {
+    background: rgba(234, 179, 8, 0.12) !important;
+    color: #facc15 !important;
+    border: 1px solid rgba(234, 179, 8, 0.3) !important;
+}
+
+.disposition-error {
+    background: rgba(249, 115, 22, 0.12) !important;
+    color: #fb923c !important;
+    border: 1px solid rgba(249, 115, 22, 0.3) !important;
+}
+
+.disposition-unknown {
+    background: rgba(148, 163, 184, 0.08) !important;
+    color: #94a3b8 !important;
+    border: 1px dashed rgba(148, 163, 184, 0.25) !important;
+    font-style: italic;
+}
+
+/* Disposition section in detail modal */
+.disposition-section {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: var(--bg-primary);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    margin-top: 12px;
+}
+
+.disposition-section .disposition-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.disposition-section .disposition-badge {
+    font-size: 13px;
+    padding: 6px 14px;
+}
+
 /* --- Planned Calls Section --- */
 .planned-section {
     margin-bottom: 32px;

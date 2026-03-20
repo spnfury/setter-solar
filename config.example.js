@@ -21,8 +21,8 @@ window.APP_CONFIG = {
     ZADARMA_KEY: 'YOUR_ZADARMA_KEY_HERE',
     ZADARMA_SECRET: 'YOUR_ZADARMA_SECRET_HERE',
     ZADARMA_FROM_NUMBER: 'YOUR_ZADARMA_FROM_NUMBER',
-    // OpenAI (para informes diarios y diagnóstico IA)
-    OPENAI_API_KEY: 'YOUR_OPENAI_API_KEY_HERE',
+    // Groq (para informes diarios y diagnóstico IA)
+    GROQ_API_KEY: 'YOUR_GROQ_API_KEY_HERE',
     // Contraseña de acceso al dashboard
     DASHBOARD_PASSWORD: 'your_password_here',
 };

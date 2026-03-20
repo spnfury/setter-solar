@@ -1,10 +1,14 @@
 // ── Auth & Dynamic Configuration ──
-const AUTH_URL = 'https://n8n.srv889387.hstgr.cloud/webhook/setter-solar-auth';
-const VERIFY_URL = 'https://n8n.srv889387.hstgr.cloud/webhook/setter-solar-verify';
+// ── Environment-aware API base URLs (proxy for localhost, direct for production) ──
+const _isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+const AUTH_URL = _isLocal ? '/n8n-webhook/webhook/setter-solar-auth' : 'https://optima-n8n.vhsxer.easypanel.host/webhook/setter-solar-auth';
+const VERIFY_URL = _isLocal ? '/n8n-webhook/webhook/setter-solar-verify' : 'https://optima-n8n.vhsxer.easypanel.host/webhook/setter-solar-verify';
+const VAPI_API_BASE = _isLocal ? '/vapi-api' : 'https://api.vapi.ai';
+const NOCODB_PROXY_BASE = _isLocal ? '/nocodb-api' : 'https://optima-nocodb.vhsxer.easypanel.host';
 
 // These will be populated dynamically after login
 let API_BASE = '', LEADS_TABLE = '', CALL_LOGS_TABLE = '', CONFIRMED_TABLE = '',
-    ERROR_LOGS_TABLE = '', XC_TOKEN = '', VAPI_API_KEY = '', OPENAI_API_KEY = '',
+    ERROR_LOGS_TABLE = '', XC_TOKEN = '', VAPI_API_KEY = '', GROQ_API_KEY = '',
     VAPI_PHONE_NUMBER_ID = '', VAPI_ASSISTANT_ID = '', VAPI_PUBLIC_KEY = '',
     ZADARMA_KEY = '', ZADARMA_SECRET = '', ZADARMA_FROM_NUMBER = '';
 
@@ -12,7 +16,12 @@ let _userConfig = {}; // Store the full user config
 
 function applyConfig(config) {
     _userConfig = config;
-    API_BASE = config.api_base || '';
+    // Rewrite NocoDB base through Vite proxy on localhost to avoid CORS
+    let rawBase = config.api_base || '';
+    if (_isLocal && rawBase.includes('optima-nocodb.vhsxer.easypanel.host')) {
+        rawBase = rawBase.replace('https://optima-nocodb.vhsxer.easypanel.host', '/nocodb-api');
+    }
+    API_BASE = rawBase;
     LEADS_TABLE = config.leads_table || '';
     CALL_LOGS_TABLE = config.call_logs_table || '';
     CONFIRMED_TABLE = config.confirmed_table || '';
@@ -20,7 +29,7 @@ function applyConfig(config) {
     XC_TOKEN = config.xc_token || '';
     VAPI_API_KEY = config.vapi_api_key || '';
     VAPI_PUBLIC_KEY = config.vapi_public_key || '';
-    OPENAI_API_KEY = config.openai_api_key || '';
+    GROQ_API_KEY = config.groq_api_key || config.GROQ_API_KEY || '';
     VAPI_PHONE_NUMBER_ID = config.vapi_phone_number_id || '';
     VAPI_ASSISTANT_ID = config.vapi_assistant_id || '';
     ZADARMA_KEY = config.zadarma_key || '';
@@ -48,6 +57,65 @@ let dateFilter = null;
 let currentCallsPage = [];
 let confirmedDataMap = {}; // vapi_call_id -> { name, phone, email }
 let activeDetailCall = null; // Global state for the currently active call in the detail view
+
+// ── Vapi API Cache & Rate Limiter ──
+// Prevents 429 (Too Many Requests) errors by caching responses and serializing requests
+const _vapiCache = new Map(); // Map<vapiCallId, { data, timestamp }>
+const VAPI_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const VAPI_REQUEST_INTERVAL_MS = 1500; // Minimum 1.5s between Vapi API requests
+let _vapiLastRequestTime = 0;
+let _vapiRequestQueue = Promise.resolve(); // Serialize all Vapi requests
+
+/**
+ * Rate-limited, cached fetch for Vapi call details.
+ * All calls to this function are serialized through a queue.
+ */
+function fetchVapiCall(vapiCallId, { skipCache = false } = {}) {
+    // Check cache first (unless skipCache)
+    if (!skipCache) {
+        const cached = _vapiCache.get(vapiCallId);
+        if (cached && (Date.now() - cached.timestamp) < VAPI_CACHE_TTL_MS) {
+            return Promise.resolve(cached.data);
+        }
+    }
+
+    // Queue the request to serialize all Vapi API calls
+    _vapiRequestQueue = _vapiRequestQueue.then(async () => {
+        // Re-check cache (another queued request may have populated it)
+        if (!skipCache) {
+            const cached = _vapiCache.get(vapiCallId);
+            if (cached && (Date.now() - cached.timestamp) < VAPI_CACHE_TTL_MS) {
+                return cached.data;
+            }
+        }
+
+        // Rate limit: wait if last request was too recent
+        const elapsed = Date.now() - _vapiLastRequestTime;
+        if (elapsed < VAPI_REQUEST_INTERVAL_MS) {
+            await new Promise(r => setTimeout(r, VAPI_REQUEST_INTERVAL_MS - elapsed));
+        }
+
+        _vapiLastRequestTime = Date.now();
+
+        const res = await fetch(`${VAPI_API_BASE}/call/${vapiCallId}`, {
+            headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
+        });
+
+        if (!res.ok) {
+            throw new Error(`Vapi HTTP ${res.status}`);
+        }
+
+        const data = await res.json();
+        _vapiCache.set(vapiCallId, { data, timestamp: Date.now() });
+        return data;
+    }).catch(err => {
+        // Don't break the queue on errors
+        console.warn(`[VapiCache] Error fetching ${vapiCallId}:`, err.message);
+        return null;
+    });
+
+    return _vapiRequestQueue;
+}
 let isEnriching = false; // Guard against multiple enrichment runs
 let paginationPage = 1;
 let paginationPageSize = 20;
@@ -64,6 +132,8 @@ const API_ERROR_LOG_KEY = 'setter_api_error_log';
 const API_ERROR_LOG_MAX = 500;
 let _errorLogQueue = [];
 let _errorLogFlushing = false;
+let _errorLogFlushFailures = 0;
+let _errorLogFlushPausedUntil = 0;
 
 function logApiError({ url, method, status, statusText, context, detail }) {
     const entry = {
@@ -85,13 +155,17 @@ function logApiError({ url, method, status, statusText, context, detail }) {
         localStorage.setItem(API_ERROR_LOG_KEY, JSON.stringify(logs));
     } catch (_) { }
 
-    // Queue for server persistence
-    _errorLogQueue.push(entry);
-    _flushErrorLogs();
+    // Queue for server persistence (cap at 50 to prevent flood)
+    if (_errorLogQueue.length < 50) {
+        _errorLogQueue.push(entry);
+        _flushErrorLogs();
+    }
 }
 
 async function _flushErrorLogs() {
     if (_errorLogFlushing || _errorLogQueue.length === 0) return;
+    // Circuit breaker: pause flushes for 60s after 3 consecutive failures
+    if (Date.now() < _errorLogFlushPausedUntil) return;
     _errorLogFlushing = true;
     try {
         // Batch up to 10 at a time
@@ -101,8 +175,14 @@ async function _flushErrorLogs() {
             headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
             body: JSON.stringify(batch)
         });
+        _errorLogFlushFailures = 0; // success resets counter
     } catch (e) {
         console.warn('[ErrorLog] Failed to flush to server:', e.message);
+        _errorLogFlushFailures++;
+        if (_errorLogFlushFailures >= 3) {
+            _errorLogFlushPausedUntil = Date.now() + 60000;
+            console.warn('[ErrorLog] Circuit breaker: pausing flush for 60s after 3 failures');
+        }
     } finally {
         _errorLogFlushing = false;
         // If more queued, flush again after a short delay
@@ -165,8 +245,27 @@ function downloadApiErrors() {
 // Expose to console for manual inspection
 window._apiErrors = { get: getApiErrors, getServer: getApiErrorsFromServer, clear: clearApiErrors, clearServer: clearServerErrors, download: downloadApiErrors };
 
+function updateGlobalSchedulerBadge(allRecords) {
+    try {
+        const scheduled = allRecords.filter(l => (l.status || '').toLowerCase() === 'programado' || l.fecha_planificada).length;
+        const badge = document.getElementById('nav-tab-scheduler-badge');
+        if (badge) {
+            if (scheduled > 0) {
+                badge.textContent = `(${scheduled})`;
+                badge.style.display = 'inline';
+            } else {
+                badge.style.display = 'none';
+                badge.textContent = '';
+            }
+        }
+    } catch (e) {
+        console.error('Error updating scheduler badge:', e);
+    }
+}
+
 async function fetchCachedLeads(forceRefresh = false) {
     if (!forceRefresh && _leadsCache && (Date.now() - _leadsCacheTime) < DATA_CACHE_TTL) {
+        updateGlobalSchedulerBadge(_leadsCache);
         return _leadsCache;
     }
     let allRecords = [];
@@ -185,6 +284,7 @@ async function fetchCachedLeads(forceRefresh = false) {
     }
     _leadsCache = allRecords;
     _leadsCacheTime = Date.now();
+    updateGlobalSchedulerBadge(allRecords);
     return allRecords;
 }
 
@@ -336,8 +436,8 @@ function formatDate(dateStr, short = false) {
 }
 
 function getBadgeClass(evaluation) {
-    if (!evaluation) return 'pending';
-    const e = evaluation.toLowerCase();
+    if (!evaluation || evaluation === false || evaluation === 'false') return 'pending';
+    const e = String(evaluation).toLowerCase();
     if (e.includes('contestador') || e.includes('voicemail') || e.includes('buzón') || e.includes('máquina')) return 'voicemail';
     if (e.includes('success') || e.includes('completed') || e.includes('confirmada') || e.includes('ok') || e.includes('completada')) return 'success';
     if (e.includes('fail') || e.includes('error') || e.includes('no contesta') || e.includes('rechazada') || e.includes('fallida') || e.includes('ocupado')) return 'fail';
@@ -478,7 +578,7 @@ async function generateCallDiagnostic(call) {
             <div class="diagnostic-loading">
                 <div class="diagnostic-spinner"></div>
                 <div>Analizando llamada con IA...</div>
-                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">Consultando Vapi + GPT-4o-mini</div>
+                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">Consultando Vapi + Groq Llama 3</div>
             </div>
         </div>`;
 
@@ -488,7 +588,7 @@ async function generateCallDiagnostic(call) {
     // 1. Fetch full Vapi data
     try {
         if (vapiId && vapiId.startsWith('019')) {
-            const res = await fetch(`https://api.vapi.ai/call/${vapiId}`, {
+            const res = await fetch(`${VAPI_API_BASE}/call/${vapiId}`, {
                 headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
             });
             if (res.ok) vapiData = await res.json();
@@ -546,16 +646,16 @@ Responde EXACTAMENTE en JSON puro (sin markdown, sin \`\`\`):
 
     let aiResult = null;
     try {
-        const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
             headers: {
-                'Authorization': `Bearer ${OPENAI_API_KEY}`,
+                'Authorization': `Bearer ${GROQ_API_KEY}`,
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                model: 'gpt-4o-mini',
+                model: 'llama-3.3-70b-versatile',
                 messages: [
-                    { role: 'system', content: 'Eres un analista de ventas. Responde siempre en JSON válido, sin markdown.' },
+                    { role: 'system', content: 'Eres un analista de ventas. Responde siempre en JSON válido, sin bloques de código markdown ni backticks.' },
                     { role: 'user', content: prompt }
                 ],
                 temperature: 0.7,
@@ -566,11 +666,14 @@ Responde EXACTAMENTE en JSON puro (sin markdown, sin \`\`\`):
         if (res.ok) {
             const data = await res.json();
             const content = data.choices[0]?.message?.content || '';
-            const jsonStr = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+            let jsonStr = content.trim();
+            if (jsonStr.startsWith('\`\`\`')) {
+                jsonStr = jsonStr.replace(/^\`\`\`(?:json)?\n?/, '').replace(/\n?\`\`\`$/, '');
+            }
             aiResult = JSON.parse(jsonStr);
         }
     } catch (e) {
-        console.warn('[Diagnostic] OpenAI error:', e);
+        console.warn('[Diagnostic] Groq/API error:', e);
     }
 
     // 3. Render diagnostic
@@ -870,7 +973,7 @@ function renderAppointments(records) {
         const fd = row['Fecha Cita'] || row.call_date;
         const status = getAppointmentStatus(fd);
         const callId = row['Vapi Call ID'] || '-';
-        const shortCallId = callId.length > 15 ? callId.substring(0, 8) + '...' : callId;
+        const shortCallId = callId;
         const phone = row['Teléfono Confirmado'] || row.lead_phone || '-';
         const phoneCleaned = phone.replace(/\D/g, '');
 
@@ -880,9 +983,11 @@ function renderAppointments(records) {
             <td>${escapeHtml(sanitizeName(row['Nombre Confirmado'] || row.lead_name || '-'))}</td>
             <td class="phone">${phone !== '-' ? `<button class="appt-phone-btn" onclick="window.open('tel:${escapeHtml(phoneCleaned)}')">📞 ${escapeHtml(phone)}</button>` : '-'}</td>
             <td>${escapeHtml(row['Email Confirmado'] || '-')}</td>
-            <td><code title="${escapeHtml(callId)}">${escapeHtml(shortCallId)}</code></td>
+            <td><code style="font-family: monospace; color: var(--accent); font-size: 11px;" title="${escapeHtml(callId)}">${escapeHtml(shortCallId)}</code> <button class="copy-id-btn" data-copy-id="${escapeHtml(callId)}" title="Copiar ID completo" style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 4px;opacity:0.6;transition:opacity 0.2s;vertical-align:middle;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">📋</button></td>
             <td>
                 <button class="action-btn" onclick="window._viewAppointmentCall('${escapeHtml(callId)}')">👁 Ver</button>
+                ${row.calendar_link ? `<a href="${row.calendar_link}" target="_blank" class="action-btn" style="background: rgba(59, 130, 246, 0.1); color: #3b82f6; border-color: rgba(59, 130, 246, 0.2); text-decoration: none;">🗓️ GCal</a>` : ''}
+                <button class="action-btn" onclick="window._deleteAppointment('${row.Id}', '${row.calendar_event_id || ''}')" style="background: rgba(239, 68, 68, 0.1); color: #ef4444; border-color: rgba(239, 68, 68, 0.2); margin-left: 4px;">🗑️ Borrar</button>
             </td>
         `;
         tbody.appendChild(tr);
@@ -896,6 +1001,31 @@ window._viewAppointmentCall = (vapiCallId) => {
         openDetailDirect(call);
     } else {
         alert('Llamada original no encontrada en el historial reciente.');
+    }
+};
+
+window._deleteAppointment = async (recordId, eventId) => {
+    if (!confirm('¿Seguro que quieres borrar esta cita? Esto la eliminará de NocoDB y de Google Calendar si estaba vinculada.')) return;
+    
+    try {
+        // Step 1: Call n8n to delete Calendar Event (Fire and forget, or await)
+        if (eventId) {
+            await fetch(`https://optima-n8n.vhsxer.easypanel.host/webhook/delete-appointment?eventId=${eventId}`, { method: 'DELETE' })
+                .catch(err => console.warn('GCal delete webhook warned:', err));
+        }
+
+        // Step 2: Delete from NocoDB
+        const res = await fetch(`${API_BASE}/${CONFIRMED_TABLE}/records`, {
+            method: 'DELETE',
+            headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+            body: JSON.stringify([recordId])
+        });
+        
+        if (!res.ok) throw new Error('Error al borrar cita en la base de datos');
+        
+        loadAppointments();
+    } catch (err) {
+        alert('Error: ' + err.message);
     }
 };
 
@@ -965,6 +1095,138 @@ async function saveManualAppointment() {
     }
 }
 
+// ── Call Disposition Classification ──
+// Classifies the commercial outcome of a call based on transcript content
+function classifyCallDisposition(call, transcriptText) {
+    const evalLower = (call.evaluation || '').toLowerCase();
+    const reasonLower = (call.ended_reason || '').toLowerCase();
+    const duration = parseInt(call.duration_seconds) || 0;
+    const isConf = confirmedDataMap[call.vapi_call_id];
+
+    // 1. Direct mappings from technical signals
+    if (isConf) return 'Cita Agendada';
+
+    if (evalLower.includes('error') || evalLower.includes('fallida') ||
+        reasonLower.includes('error') || reasonLower.includes('fail') ||
+        reasonLower.includes('sip') || reasonLower.includes('transport')) {
+        return 'Error Técnico';
+    }
+
+    if (evalLower.includes('no contesta') || evalLower.includes('contestador') ||
+        evalLower.includes('voicemail') || evalLower.includes('buzón') ||
+        evalLower.includes('máquina') || evalLower.includes('no disponible') ||
+        evalLower.includes('ocupado') || evalLower.includes('sin respuesta') ||
+        reasonLower.includes('no contesta') || reasonLower.includes('voicemail') ||
+        reasonLower.includes('machine') || reasonLower.includes('busy')) {
+        return 'No Contactado';
+    }
+
+    // 2. No transcript or too short → insufficient data
+    if (!transcriptText || transcriptText.trim().length < 30) {
+        return duration < 10 ? 'No Contactado' : 'Datos Insuficientes';
+    }
+
+    // 3. Analyze transcript — focus on last client turns
+    const text = transcriptText.toLowerCase();
+    const lines = text.split('\n').filter(l => l.trim());
+
+    // Extract client lines (lines containing "user:" or "cliente:" or lines not starting with "ai:" / "bot:" / "assistant:")
+    const clientLines = lines.filter(l => {
+        const trimmed = l.trim();
+        return trimmed.startsWith('user:') || trimmed.startsWith('cliente:') ||
+               (!trimmed.startsWith('ai:') && !trimmed.startsWith('bot:') && !trimmed.startsWith('assistant:'));
+    });
+
+    // Focus on the last 3 client turns for final intent
+    const lastClientTurns = clientLines.slice(-3).join(' ');
+    const allClientText = clientLines.join(' ');
+
+    // Keywords for Cita Agendada (strongest signal)
+    const citaPatterns = [
+        'quedo a las', 'nos vemos', 'perfecto.*cita', 'cita.*confirmada',
+        'apunta.*cita', 'agendar', 'visita.*técnica', 'paso por',
+        'mañana a las', 'el lunes', 'el martes', 'el miércoles', 'el jueves', 'el viernes',
+        'queda confirmad'
+    ];
+    if (citaPatterns.some(p => new RegExp(p).test(lastClientTurns)) ||
+        citaPatterns.some(p => new RegExp(p).test(allClientText))) {
+        return 'Cita Agendada';
+    }
+
+    // Keywords for No Interesado
+    const noInteresPatterns = [
+        'no me interesa', 'no estoy interesad', 'no quiero', 'no gracias',
+        'quita mi número', 'no me llam', 'borr.*datos', 'lista robinson',
+        'no necesito', 'ya tengo', 'no no no', 'déjame en paz',
+        'no vuelvas a llamar', 'no quiero saber nada', 'no estamos interesad',
+        'no nos interesa', 'no te preocupes.*no'
+    ];
+    if (noInteresPatterns.some(p => new RegExp(p).test(lastClientTurns))) {
+        return 'No Interesado';
+    }
+
+    // Keywords for Llamar Otro Momento
+    const otroMomentoPatterns = [
+        'llam.*más tarde', 'llám.*otro', 'ahora no puedo', 'estoy ocupad',
+        'estoy trabajando', 'otro momento', 'en otro momento', 'ahora mismo no',
+        'llama.*luego', 'más tarde', 'no es buen momento', 'estoy liado',
+        'llama mañana', 'llama.*semana', 'estoy conduciendo', 'estoy en una reunión',
+        'puedes llamar.*después', 'me llama.*tarde', 'me pilla mal'
+    ];
+    if (otroMomentoPatterns.some(p => new RegExp(p).test(lastClientTurns))) {
+        return 'Llamar Otro Momento';
+    }
+
+    // Keywords for Interesado
+    const interesadoPatterns = [
+        'sí.*interes', 'me interesa', 'cuéntame más', 'dime más',
+        'quiero saber', 'está bien', 'de acuerdo', 'vale.*sí',
+        'suena bien', 'cuánto.*ahorr', 'qué.*precio', 'me gustaría',
+        'claro.*sí', 'por supuesto', 'sí.*quiero', 'adelante',
+        'envíame información', 'mándame', 'pásate', 'cuánto cuesta',
+        'cómo funciona', 'qué.*oferta'
+    ];
+    if (interesadoPatterns.some(p => new RegExp(p).test(lastClientTurns))) {
+        return 'Interesado';
+    }
+
+    // Check broader context for No Interesado (entire conversation)
+    if (noInteresPatterns.some(p => new RegExp(p).test(allClientText))) {
+        return 'No Interesado';
+    }
+
+    // Check broader context for Llamar Otro Momento
+    if (otroMomentoPatterns.some(p => new RegExp(p).test(allClientText))) {
+        return 'Llamar Otro Momento';
+    }
+
+    // Fallback: if call was "Completada" with decent duration, mark as Interesado (they engaged)
+    if ((evalLower.includes('completada') || evalLower.includes('confirmada')) && duration > 45) {
+        return 'Interesado';
+    }
+
+    // If "Colgó rápido" → likely not interested
+    if (evalLower.includes('colgó rápido')) {
+        return 'No Interesado';
+    }
+
+    return 'Datos Insuficientes';
+}
+
+// Get disposition display props
+function getDispositionProps(disposition) {
+    const map = {
+        'Interesado':           { icon: '🟢', cls: 'disposition-interesado', color: '#22c55e' },
+        'Cita Agendada':        { icon: '📅', cls: 'disposition-cita', color: '#f59e0b' },
+        'No Interesado':        { icon: '🔴', cls: 'disposition-no-interesado', color: '#ef4444' },
+        'Llamar Otro Momento':  { icon: '🕐', cls: 'disposition-callback', color: '#3b82f6' },
+        'No Contactado':        { icon: '⚪', cls: 'disposition-no-contacto', color: '#64748b' },
+        'Datos Insuficientes':  { icon: '🟡', cls: 'disposition-insuficiente', color: '#eab308' },
+        'Error Técnico':        { icon: '⚠️', cls: 'disposition-error', color: '#f97316' }
+    };
+    return map[disposition] || { icon: '❓', cls: 'disposition-unknown', color: '#94a3b8' };
+}
+
 // Enrich calls with missing data from Vapi API
 async function enrichCallsFromVapi(calls) {
     // Only enrich calls that still look un-processed (Call Initiated or no evaluation)
@@ -972,7 +1234,7 @@ async function enrichCallsFromVapi(calls) {
         c.vapi_call_id && c.vapi_call_id.startsWith('019') &&
         (!c.evaluation || c.evaluation === 'Pendiente' ||
             c.ended_reason === 'Call Initiated' || c.ended_reason === 'call_initiated')
-    ).slice(0, 15); // Process up to 15 per cycle
+    ).slice(0, 5); // Process up to 5 per cycle (was 15 — reduced to avoid 429s)
 
     if (callsToEnrich.length === 0) return false;
 
@@ -980,7 +1242,8 @@ async function enrichCallsFromVapi(calls) {
     function mapEndedReason(reason) {
         if (!reason) return 'Desconocido';
         const r = reason.toLowerCase();
-        if (r.includes('sip') && r.includes('failed')) return 'Sin conexión (SIP)';
+        if (r.includes('sip') && r.includes('480')) return 'No disponible (apagado)';
+        if (r.includes('sip') && r.includes('failed') && !r.includes('503')) return 'Sin conexión (SIP)';
         if (r.includes('sip') && r.includes('busy')) return 'Línea ocupada';
         if (r.includes('sip') && r.includes('503')) return 'Servicio no disponible';
         if (r === 'customer-busy') return 'Línea ocupada';
@@ -999,29 +1262,11 @@ async function enrichCallsFromVapi(calls) {
     let updated = false;
     for (const call of callsToEnrich) {
         try {
-            const res = await fetch(`https://api.vapi.ai/call/${call.vapi_call_id}`, {
-                headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
-            });
-            if (!res.ok) {
-                logApiError({ url: `https://api.vapi.ai/call/${call.vapi_call_id}`, method: 'GET', status: res.status, statusText: res.statusText, context: 'enrichCallsFromVapi', detail: `callId=${call.vapi_call_id}` });
-                if (res.status === 429) break; // Stop if rate limited
-                // If Vapi returns 404 (call not found) or other client errors, the call never completed — mark as Error
-                if (res.status === 404 || res.status === 402 || res.status === 403) {
-                    const errorLabel = res.status === 404 ? 'Llamada no encontrada' : 'Error de cuenta (sin saldo)';
-                    call.evaluation = 'Error';
-                    call.ended_reason = errorLabel;
-                    call.duration_seconds = 0;
-                    // Update NocoDB
-                    fetch(`${API_BASE}/${CALL_LOGS_TABLE}/records`, {
-                        method: 'PATCH',
-                        headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
-                        body: JSON.stringify([{ id: call.id || call.Id, evaluation: 'Error', ended_reason: errorLabel, duration_seconds: 0 }])
-                    }).catch(err => console.warn('Failed to update error call log:', err));
-                    updated = true;
-                }
+            const vapiData = await fetchVapiCall(call.vapi_call_id, { skipCache: true });
+            if (!vapiData) {
+                logApiError({ url: `${VAPI_API_BASE}/call/${call.vapi_call_id}`, method: 'GET', status: 'error', statusText: 'null response', context: 'enrichCallsFromVapi', detail: `callId=${call.vapi_call_id}` });
                 continue;
             }
-            const vapiData = await res.json();
 
             // If call has a failed status, mark as Error
             if (vapiData.status === 'failed') {
@@ -1032,7 +1277,7 @@ async function enrichCallsFromVapi(calls) {
                 fetch(`${API_BASE}/${CALL_LOGS_TABLE}/records`, {
                     method: 'PATCH',
                     headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
-                    body: JSON.stringify([{ id: call.id || call.Id, evaluation: 'Error', ended_reason: mapEndedReason(failReason), duration_seconds: 0 }])
+                    body: JSON.stringify([{ Id: call.id || call.Id, evaluation: 'Error', ended_reason: mapEndedReason(failReason), duration_seconds: 0 }])
                 }).catch(err => console.warn('Failed to update failed call log:', err));
                 updated = true;
                 await new Promise(r => setTimeout(r, 400));
@@ -1069,7 +1314,12 @@ async function enrichCallsFromVapi(calls) {
             if (isConf) {
                 evaluation = 'Confirmada ✓';
             } else if (reasonLower.includes('sip') && (reasonLower.includes('failed') || reasonLower.includes('error'))) {
-                evaluation = 'Fallida';
+                // Differentiate SIP 480 (phone unreachable) from SIP 503 (trunk error)
+                if (reasonLower.includes('failed-to-connect') || reasonLower.includes('480')) {
+                    evaluation = 'No disponible';
+                } else {
+                    evaluation = 'Fallida';
+                }
             } else if (reason === 'customer-busy') {
                 evaluation = 'Ocupado';
             } else if (reason === 'customer-did-not-answer') {
@@ -1095,8 +1345,8 @@ async function enrichCallsFromVapi(calls) {
             }
 
             // Build human-readable ended_reason
-            const isTestCall = (call.ended_reason || '').includes('Manual Trigger');
-            const endedReason = isTestCall ? 'Manual Trigger' : mapEndedReason(vapiData.endedReason);
+            const isTestCall = (call.ended_reason || '').includes('Manual Trigger') || call.is_test === true || call.is_test === 1;
+            const endedReason = mapEndedReason(vapiData.endedReason);
 
             // Update local data
             call.duration_seconds = duration;
@@ -1105,13 +1355,21 @@ async function enrichCallsFromVapi(calls) {
             call.transcript = vapiData.artifact?.transcript || call.transcript;
             call.recording_url = vapiData.artifact?.recordingUrl || call.recording_url;
 
+            // Classify disposition based on transcript content
+            const disposition = classifyCallDisposition(call, vapiData.artifact?.transcript || call.transcript || '');
+            call.call_disposition = disposition;
+
             // Update NocoDB in background
             const updateData = {
-                id: call.id || call.Id,
+                Id: call.id || call.Id,
                 duration_seconds: duration,
                 evaluation: evaluation,
-                ended_reason: endedReason
+                ended_reason: endedReason,
+                call_disposition: disposition
             };
+            if (isTestCall) {
+                updateData.is_test = true;
+            }
             if (vapiData.artifact?.transcript) {
                 updateData.transcript = vapiData.artifact.transcript.substring(0, 5000);
             }
@@ -1256,7 +1514,7 @@ function renderDashboard(calls) {
     calls.forEach((call, index) => {
         const tr = document.createElement('tr');
         const vapiId = call.vapi_call_id || call.lead_id || call.id || call.Id || '-';
-        const shortId = vapiId.length > 20 ? vapiId.substring(0, 8) + '...' : vapiId;
+        const shortId = vapiId;
 
         const isSyncing = !call.ended_reason || call.ended_reason === 'Call Initiated' || call.ended_reason.toLowerCase().includes('in progress');
         const statusText = isSyncing ? '<span class="loading" style="font-size: 11px; color: var(--accent);">⏳ Sincronizando...</span>' : formatStatus(call.ended_reason);
@@ -1268,7 +1526,7 @@ function renderDashboard(calls) {
             <td>
                 <button class="action-btn" data-index="${index}">👁 Ver Detalle</button>
             </td>
-            <td><code style="font-family: monospace; color: var(--accent); font-size: 11px;" title="${vapiId}">${shortId}</code></td>
+            <td><code style="font-family: monospace; color: var(--accent); font-size: 11px;" title="${vapiId}">${shortId}</code> <button class="copy-id-btn" data-copy-id="${vapiId}" title="Copiar ID completo" style="background:none;border:none;cursor:pointer;font-size:12px;padding:2px 4px;opacity:0.6;transition:opacity 0.2s;vertical-align:middle;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">📋</button></td>
             <td><strong>${call.lead_name || '-'}</strong></td>
             <td class="phone">${call.phone_called || '-'}</td>
             <td>${formatDate(call.call_time || call.CreatedAt)}</td>
@@ -1284,21 +1542,22 @@ function renderDashboard(calls) {
 }
 
 function applyFilters() {
-    const from = document.getElementById('date-from').value;
-    const to = document.getElementById('date-to').value;
+    const rawRange = document.getElementById('date-range');
+    const dateRange = rawRange ? rawRange.value : '';
 
     let filtered = allCalls;
 
-    if (from) {
-        const fromDate = new Date(from);
-        fromDate.setHours(0, 0, 0, 0);
-        filtered = filtered.filter(c => new Date(c.CreatedAt || c.call_time) >= fromDate);
-    }
-
-    if (to) {
-        const toDate = new Date(to);
-        toDate.setHours(23, 59, 59, 999);
-        filtered = filtered.filter(c => new Date(c.CreatedAt || c.call_time) <= toDate);
+    if (dateRange && dateRange.includes(' a ')) {
+        const [startStr, endStr] = dateRange.split(' a ');
+        const start = new Date(startStr);
+        start.setHours(0, 0, 0, 0);
+        const end = new Date(endStr);
+        end.setHours(23, 59, 59, 999);
+        
+        filtered = filtered.filter(c => {
+            const callDate = new Date(c.CreatedAt || c.call_time);
+            return callDate >= start && callDate <= end;
+        });
     }
 
     renderDashboard(filtered);
@@ -1411,8 +1670,27 @@ async function openDetailDirect(call) {
             `;
         }
 
+        // ── Render Disposition ──
+        const dispSec = document.getElementById('disposition-section') || (() => {
+            const div = document.createElement('div');
+            div.id = 'disposition-section';
+            div.className = 'disposition-section';
+            if (scoreSec) scoreSec.after(div);
+            return div;
+        })();
+        if (dispSec) {
+            const disp = call.call_disposition || classifyCallDisposition(call, call.transcript || '');
+            const dp = getDispositionProps(disp);
+            dispSec.style.display = 'flex';
+            dispSec.innerHTML = `
+                <span class="disposition-label">📋 Disposición:</span>
+                <span class="badge disposition-badge ${dp.cls}">${dp.icon} ${disp}</span>
+            `;
+        }
+
         // Show error section if applicable
-        if (call.ended_reason && (call.ended_reason.includes('Error') || call.ended_reason.includes('fail'))) {
+        const isErrorState = call.evaluation === 'Error' || call.evaluation === 'Fallida' || call.ended_reason?.includes('Error') || call.ended_reason?.includes('fail');
+        if (isErrorState) {
             if (errorSec) {
                 errorSec.style.display = 'block';
                 document.getElementById('modal-error-detail').textContent = call.ended_reason;
@@ -1437,11 +1715,8 @@ async function openDetailDirect(call) {
         // Fetch Vapi data
         if (vapiId && vapiId.startsWith('019')) {
             try {
-                const res = await fetch(`https://api.vapi.ai/call/${vapiId}`, {
-                    headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
-                });
-                if (res.ok) {
-                    const vapi = await res.json();
+                const vapi = await fetchVapiCall(vapiId);
+                if (vapi) {
                     const transcript = vapi.artifact?.transcript || vapi.transcript || '';
                     const formattedTranscript = formatTranscriptHTML(transcript);
                     transcriptEl.innerHTML = formattedTranscript
@@ -1556,37 +1831,43 @@ async function openDetail(index) {
     // 1. Fetch Real-time data from Vapi
     if (vapiId && vapiId.startsWith('019')) { // Vapi IDs usually start with 019
         try {
-            const vapiRes = await fetch(`https://api.vapi.ai/call/${vapiId}`, {
-                headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
-            });
+            const vapiData = await fetchVapiCall(vapiId);
 
-            if (vapiRes.ok) {
-                const vapiData = await vapiRes.json();
-                const rawTranscript = vapiData.transcript || '';
+            if (vapiData) {
+                const rawTranscript = vapiData.artifact?.transcript || vapiData.transcript || call.transcript || '';
                 const formattedTranscript = formatTranscriptHTML(rawTranscript);
                 transcriptEl.innerHTML = formattedTranscript
                     ? formattedTranscript
-                    : '<span style="color:var(--text-secondary)">No hay transcripción disponible en Vapi.</span>';
+                    : '<span style="color:var(--text-secondary)">No hay transcripción disponible en Vapi ni en local.</span>';
 
-                if (vapiData.recordingUrl) {
+                const recUrl = call.recording_url || vapiData.artifact?.recordingUrl || vapiData.recordingUrl;
+                if (recUrl) {
                     audioSec.style.display = 'block';
-                    audio.src = vapiData.recordingUrl;
+                    audio.src = recUrl;
                 }
 
                 // Show extraction tools if transcript exists
-                if (vapiData.transcript) {
+                if (rawTranscript) {
                     document.getElementById('extraction-tools').style.display = 'block';
                     document.getElementById('extraction-results').style.display = 'none';
                 }
             } else {
-                console.warn('Vapi API error:', vapiRes.status);
+                console.warn('Vapi API error, fallback to local transcript');
                 const fallbackFormatted = formatTranscriptHTML(call.transcript || '');
                 transcriptEl.innerHTML = fallbackFormatted || '<span style="color:var(--text-secondary)">No hay transcripción disponible (error API Vapi).</span>';
+                if (call.recording_url) {
+                    audioSec.style.display = 'block';
+                    audio.src = call.recording_url;
+                }
             }
         } catch (err) {
             console.error('Error fetching Vapi detail:', err);
             const fallbackFormatted = formatTranscriptHTML(call.transcript || '');
             transcriptEl.innerHTML = fallbackFormatted || '<span style="color:var(--text-secondary)">No hay transcripción disponible (error de conexión).</span>';
+            if (call.recording_url) {
+                audioSec.style.display = 'block';
+                audio.src = call.recording_url;
+            }
         }
     } else {
         // Fallback to local data if no valid Vapi ID
@@ -1634,7 +1915,8 @@ async function openDetail(index) {
 
     const errorSec = document.getElementById('error-section');
     const errorDetail = document.getElementById('modal-error-detail');
-    if (call.ended_reason && (call.ended_reason.includes('Error') || call.ended_reason.includes('fail'))) {
+    const isErrorState = call.evaluation === 'Error' || call.evaluation === 'Fallida' || call.ended_reason?.includes('Error') || call.ended_reason?.includes('fail');
+    if (isErrorState) {
         errorSec.style.display = 'block';
         errorDetail.textContent = call.ended_reason;
     } else {
@@ -1652,25 +1934,31 @@ async function syncCallStatus(vapiCallId, recordId) {
     if (!vapiCallId || vapiCallId === '-' || vapiCallId === 'unknown' || vapiCallId.length < 36 || vapiCallId.startsWith('39')) return;
 
     try {
-        const res = await fetch(`https://api.vapi.ai/call/${vapiCallId}`, {
-            headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
-        });
-
-        if (!res.ok) return;
-        const data = await res.json();
+        const data = await fetchVapiCall(vapiCallId, { skipCache: true });
+        if (!data) return;
 
         // Only update if the call has ended and we have a reason
         if (data.status === 'ended' && data.endedReason) {
             console.log(`Syncing call ${vapiCallId}: ${data.endedReason}`);
 
+            let computedEval = data.analysis?.successEvaluation;
+            if (!computedEval) {
+                if (data.endedReason === 'voicemail') computedEval = 'Contestador Automático';
+                else if (data.endedReason === 'silence-timed-out') computedEval = 'No contesta';
+                else if (data.endedReason === 'customer-busy') computedEval = 'Comunica';
+                else if (data.endedReason && data.endedReason.includes('error')) computedEval = 'Fallida';
+                else if (data.durationSeconds && data.durationSeconds < 10) computedEval = 'Llamada muy corta';
+                else computedEval = 'Llamada Finalizada';
+            }
+
             const updatePayload = {
-                id: recordId, // Primary key for NocoDB
+                Id: recordId, // Primary key for NocoDB
                 ended_reason: data.endedReason,
                 duration_seconds: data.durationSeconds || 0,
                 cost: data.cost || 0,
                 transcript: data.transcript || '',
                 recording_url: data.recordingUrl || '',
-                evaluation: data.analysis?.successEvaluation || 'Completed'
+                evaluation: computedEval
             };
 
             // NocoDB V2 PATCH expects an array of objects for /records
@@ -1694,7 +1982,7 @@ async function syncPendingCalls() {
         (!c.ended_reason ||
             c.ended_reason === 'Call Initiated' ||
             c.ended_reason.toLowerCase().includes('in progress'))
-    ).slice(0, 10); // Limit to 10 per cycle to avoid API rate limits
+    ).slice(0, 5); // Reduced from 10 → 5 to avoid API rate limits
 
     if (pending.length === 0) return;
 
@@ -1704,8 +1992,8 @@ async function syncPendingCalls() {
     for (const call of pending) {
         const success = await syncCallStatus(call.vapi_call_id, call.id || call.Id);
         if (success) updatedAny = true;
-        // Delay between calls to avoid 429 rate limiting
-        await new Promise(r => setTimeout(r, 300));
+        // Delay between calls to avoid 429 rate limiting (was 300ms, increased to 2000ms)
+        await new Promise(r => setTimeout(r, 2000));
     }
 
     if (updatedAny) {
@@ -1739,7 +2027,7 @@ async function fetchScheduledLeads() {
             if (allRecords.length >= 2000) break; // Safety limit
         }
 
-        const leads = allRecords.filter(lead => lead.fecha_planificada);
+        const leads = allRecords.filter(lead => lead.fecha_planificada && (lead.status || '').toLowerCase() === 'programado');
 
         const plannedGrid = document.getElementById('planned-grid');
         const plannedSection = document.getElementById('planned-section');
@@ -1878,7 +2166,7 @@ async function renderScheduledCallsInScheduler() {
         const allRecords = await fetchCachedLeads();
         console.log('[RenderScheduled] Total records from cache:', allRecords.length);
 
-        const leads = allRecords.filter(lead => lead.fecha_planificada);
+        const leads = allRecords.filter(lead => lead.fecha_planificada && (lead.status || '').toLowerCase() === 'programado');
         console.log('[RenderScheduled] Leads with fecha_planificada:', leads.length, leads.map(l => ({ name: l.name, phone: l.phone, fecha_planificada: l.fecha_planificada, status: l.status })));
 
         if (leads.length === 0) {
@@ -1899,6 +2187,11 @@ async function renderScheduledCallsInScheduler() {
             <span>📞 ${sorted.length} total</span>
             <span style="color: #fbbf24;">⚡ ${dueCount} vencidas</span>
             <span style="color: #4ade80;">📅 ${futureCount} pendientes</span>
+            ${dueCount > 0 ? `<button onclick="rescheduleOverdueCalls()" 
+                style="background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.25); 
+                padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; white-space: nowrap; margin-left: 8px;">
+                🔄 Reprogramar Vencidas
+            </button>` : ''}
             <button onclick="cancelAllScheduledCalls()" 
                 style="background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.25); 
                 padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; white-space: nowrap; margin-left: 8px;">
@@ -2031,6 +2324,81 @@ async function cancelAllScheduledCalls() {
     }
 }
 window.cancelAllScheduledCalls = cancelAllScheduledCalls;
+
+async function rescheduleOverdueCalls() {
+    if (!confirm('🔄 ¿Reprogramar todas las llamadas vencidas a partir de ahora (cada 2 min)?')) return;
+
+    const btn = document.querySelector('[onclick="rescheduleOverdueCalls()"]');
+    const originalText = btn ? btn.innerHTML : '';
+
+    try {
+        const allRecords = await fetchCachedLeads(true);
+        const now = new Date();
+        const overdue = allRecords
+            .filter(l => l.fecha_planificada && (l.status || '').toLowerCase() === 'programado')
+            .filter(l => utcStringToLocalDate(l.fecha_planificada) <= now)
+            .filter(l => l.Id || l.id);
+
+        if (overdue.length === 0) {
+            alert('No hay llamadas vencidas para reprogramar.');
+            return;
+        }
+
+        if (btn) btn.textContent = `⏳ Reprogramando 0/${overdue.length}...`;
+
+        // Stagger: start 1 min from now, every 2 min
+        const startTime = new Date(now.getTime() + 60000);
+        const SPACING_MS = 2 * 60000; // 2 minutes
+        let success = 0;
+        let errors = 0;
+        const BATCH_SIZE = 10;
+
+        for (let i = 0; i < overdue.length; i += BATCH_SIZE) {
+            const batch = overdue.slice(i, i + BATCH_SIZE).map((l, idx) => {
+                const callTime = new Date(startTime.getTime() + (i + idx) * SPACING_MS);
+                const utcTime = `${callTime.getUTCFullYear()}-${String(callTime.getUTCMonth() + 1).padStart(2, '0')}-${String(callTime.getUTCDate()).padStart(2, '0')} ${String(callTime.getUTCHours()).padStart(2, '0')}:${String(callTime.getUTCMinutes()).padStart(2, '0')}:00`;
+                return {
+                    Id: l.Id || l.id,
+                    fecha_planificada: utcTime
+                };
+            });
+
+            try {
+                const res = await fetch(`${API_BASE}/${LEADS_TABLE}/records`, {
+                    method: 'PATCH',
+                    headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+                    body: JSON.stringify(batch)
+                });
+                if (res.ok) {
+                    success += batch.length;
+                } else {
+                    console.error('[Reschedule] Batch error:', res.status);
+                    errors += batch.length;
+                }
+            } catch (e) {
+                console.error('[Reschedule] Batch exception:', e);
+                errors += batch.length;
+            }
+
+            if (btn) btn.textContent = `⏳ Reprogramando ${Math.min(i + BATCH_SIZE, overdue.length)}/${overdue.length}...`;
+            if (i + BATCH_SIZE < overdue.length) await new Promise(r => setTimeout(r, 200));
+        }
+
+        const firstCallTime = startTime.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+        const lastCallTime = new Date(startTime.getTime() + (overdue.length - 1) * SPACING_MS).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+        alert(`✅ ${success} llamadas reprogramadas: ${firstCallTime} → ${lastCallTime}${errors > 0 ? ` (${errors} errores)` : ''}`);
+        invalidateLeadsCache();
+        renderScheduledCallsInScheduler();
+        fetchSchedulerKPIs();
+        if (typeof fetchScheduledLeads === 'function') fetchScheduledLeads();
+    } catch (err) {
+        console.error('Error rescheduling overdue calls:', err);
+        alert('Error al reprogramar: ' + err.message);
+    } finally {
+        if (btn) btn.innerHTML = originalText || '🔄 Reprogramar Vencidas';
+    }
+}
+window.rescheduleOverdueCalls = rescheduleOverdueCalls;
 
 // --- Tab Navigation ---
 function switchToTab(target) {
@@ -2183,6 +2551,7 @@ async function fetchSchedulerKPIs() {
         }).length;
 
         // Eligible = has phone, not scheduled, not called (if skip enabled), deduplicated by phone
+        const includeTestKPI = document.getElementById('sched-include-test')?.checked ?? false;
         const eligibleLeads = allRecords.filter(l => {
             const phone = String(l.phone || '').trim();
             if (!phone || phone === '0' || phone === 'null' || phone.length < 6) return false;
@@ -2190,6 +2559,7 @@ async function fetchSchedulerKPIs() {
             if (status === 'programado' || status === 'en proceso' || status === 'llamando...') return false;
             if (l.fecha_planificada) return false;
             if (calledStatuses.some(s => status.includes(s))) return false;
+            if (!includeTestKPI && typeof isTestLead === 'function' && isTestLead(l)) return false;
             return true;
         });
         // Deduplicate by phone
@@ -2236,12 +2606,27 @@ async function fetchSchedulerKPIs() {
 }
 
 
+// Test lead phones and names to exclude from scheduling by default
+const SCHEDULER_TEST_PHONES = ['666532143', '34666532143'];
+const SCHEDULER_TEST_NAMES = ['sergi', 'nayim', 'test manual', 'test', 'sergio', 'sergio test 3'];
+
+function isTestLead(lead) {
+    const phone = String(lead.phone || '').replace(/\D/g, '');
+    if (SCHEDULER_TEST_PHONES.some(tp => phone.endsWith(tp))) return true;
+    const name = (lead.name || '').toLowerCase().trim();
+    if (SCHEDULER_TEST_NAMES.includes(name)) return true;
+    if (/\btest\b/i.test(name)) return true;
+    return false;
+}
+
 async function fetchEligibleLeads(count, source) {
     // Use centralized cache to get all leads
     const allRecords = [...(await fetchCachedLeads())];
 
     // Check if we should skip already-called leads
     const skipCalled = document.getElementById('sched-skip-called')?.checked ?? true;
+    // Check if we should include test leads
+    const includeTest = document.getElementById('sched-include-test')?.checked ?? false;
 
     // Sort
     if (source === 'oldest') {
@@ -2254,7 +2639,7 @@ async function fetchEligibleLeads(count, source) {
     const calledStatuses = ['completado', 'contestador', 'voicemail', 'no contesta', 'fallido', 'interesado', 'reintentar'];
 
     // Filter: eligible leads — with debug breakdown
-    let dbgNoPhone = 0, dbgBadStatus = 0, dbgPlanned = 0, dbgCalled = 0;
+    let dbgNoPhone = 0, dbgBadStatus = 0, dbgPlanned = 0, dbgCalled = 0, dbgTest = 0;
     const eligible = allRecords.filter(lead => {
         const phone = String(lead.phone || '').trim();
         if (!phone || phone === '0' || phone === 'null' || phone.length < 6) { dbgNoPhone++; return false; }
@@ -2262,9 +2647,10 @@ async function fetchEligibleLeads(count, source) {
         if (status === 'programado' || status === 'en proceso' || status === 'llamando...') { dbgBadStatus++; return false; }
         if (lead.fecha_planificada) { dbgPlanned++; return false; }
         if (skipCalled && status && calledStatuses.some(s => status.includes(s))) { dbgCalled++; return false; }
+        if (!includeTest && isTestLead(lead)) { dbgTest++; return false; }
         return true;
     });
-    console.log(`[Scheduler][DEBUG] Rejection breakdown: noPhone=${dbgNoPhone}, activeStatus=${dbgBadStatus}, hasPlanned=${dbgPlanned}, alreadyCalled=${dbgCalled}`);
+    console.log(`[Scheduler][DEBUG] Rejection breakdown: noPhone=${dbgNoPhone}, activeStatus=${dbgBadStatus}, hasPlanned=${dbgPlanned}, alreadyCalled=${dbgCalled}, testLead=${dbgTest}`);
     // Log sample of first 5 records to inspect their fields
     console.log('[Scheduler][DEBUG] Sample records:', allRecords.slice(0, 5).map(l => ({ phone: l.phone, status: l.status, fecha_planificada: l.fecha_planificada, name: l.name })));
 
@@ -2418,6 +2804,12 @@ async function executeScheduling(leads, startTime, spacingMinutes, assistantId) 
 
     // Reset leads list to prevent stale data reuse
     schedulerLeads = [];
+    
+    // Ocultar resumen de programación al terminar
+    const summaryEl = document.getElementById('sched-summary');
+    if (summaryEl) {
+        summaryEl.style.display = 'none';
+    }
 
     // Refresh: invalidate cache and reload scheduled calls view + KPIs
     invalidateLeadsCache();
@@ -2433,6 +2825,7 @@ document.getElementById('sched-test-lead-btn')?.addEventListener('click', () => 
     document.getElementById('test-lead-modal').classList.add('active');
     document.getElementById('test-lead-name').value = '';
     document.getElementById('test-lead-phone').value = '';
+    document.getElementById('test-lead-count').value = '1';
     document.getElementById('test-lead-feedback').innerHTML = '';
 });
 
@@ -2443,6 +2836,7 @@ document.getElementById('close-test-lead-modal')?.addEventListener('click', () =
 document.getElementById('save-test-lead-btn')?.addEventListener('click', async () => {
     const name = document.getElementById('test-lead-name').value.trim();
     const phone = document.getElementById('test-lead-phone').value.trim();
+    const count = Math.min(Math.max(parseInt(document.getElementById('test-lead-count')?.value) || 1, 1), 20);
     const feedback = document.getElementById('test-lead-feedback');
 
     if (!phone) {
@@ -2452,63 +2846,83 @@ document.getElementById('save-test-lead-btn')?.addEventListener('click', async (
 
     const saveBtn = document.getElementById('save-test-lead-btn');
     saveBtn.disabled = true;
-    saveBtn.textContent = '⏳ Guardando y programando...';
+    saveBtn.textContent = `⏳ Creando ${count} lead${count > 1 ? 's' : ''}...`;
 
     try {
-        // Schedule NOW so the test lead goes to position 1 in the queue
-        const now = new Date();
-        const nowUtc = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')} ${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}:00`;
+        // Find the last scheduled call time to append after it
+        const allRecords = await fetchCachedLeads();
+        const scheduledLeads = allRecords
+            .filter(l => l.fecha_planificada && (l.status || '').toLowerCase() === 'programado')
+            .sort((a, b) => utcStringToLocalDate(b.fecha_planificada) - utcStringToLocalDate(a.fecha_planificada));
+
+        const SPACING_MS = 2 * 60000; // 2 minutes
+        let startTime;
+
+        if (scheduledLeads.length > 0) {
+            // Start after the last scheduled call + spacing
+            const lastScheduledTime = utcStringToLocalDate(scheduledLeads[0].fecha_planificada);
+            startTime = new Date(Math.max(lastScheduledTime.getTime() + SPACING_MS, Date.now() + 60000));
+        } else {
+            // No queue — start from now + 1 min
+            startTime = new Date(Date.now() + 60000);
+        }
+
         const assistantId = document.getElementById('sched-assistant')?.value || '';
+        const leadsToCreate = [];
 
-        const leadData = {
-            name: name || 'Test Lead ' + new Date().toLocaleTimeString(),
-            phone: phone,
-            status: 'Programado',
-            fecha_planificada: nowUtc,
-            unique_id: 'test_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5)
-        };
-        if (assistantId) leadData.assistant_id = assistantId;
+        for (let i = 0; i < count; i++) {
+            const callTime = new Date(startTime.getTime() + i * SPACING_MS);
+            const utcTime = `${callTime.getUTCFullYear()}-${String(callTime.getUTCMonth() + 1).padStart(2, '0')}-${String(callTime.getUTCDate()).padStart(2, '0')} ${String(callTime.getUTCHours()).padStart(2, '0')}:${String(callTime.getUTCMinutes()).padStart(2, '0')}:00`;
 
-        console.log('[TestLead] Sending POST with data:', JSON.stringify(leadData));
-        console.log('[TestLead] URL:', `${API_BASE}/${LEADS_TABLE}/records`);
+            const leadData = {
+                name: count > 1 ? `${name || 'Test'} #${i + 1}` : (name || 'Test Lead ' + new Date().toLocaleTimeString()),
+                phone: count > 1 ? phone.replace(/(\d)$/, '') + (parseInt(phone.slice(-1)) + i) % 10 : phone,
+                status: 'Programado',
+                fecha_planificada: utcTime,
+                unique_id: 'test_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5)
+            };
+            if (assistantId) leadData.assistant_id = assistantId;
+            leadsToCreate.push(leadData);
+        }
 
-        const res = await fetch(`${API_BASE}/${LEADS_TABLE}/records`, {
-            method: 'POST',
-            headers: {
-                'xc-token': XC_TOKEN,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify([leadData])
-        });
+        console.log(`[TestLead] Creating ${leadsToCreate.length} test leads`);
 
-        const responseData = await res.json();
-        console.log('[TestLead] POST response status:', res.status, 'data:', JSON.stringify(responseData));
+        // Create in batches of 10
+        let created = 0;
+        for (let i = 0; i < leadsToCreate.length; i += 10) {
+            const batch = leadsToCreate.slice(i, i + 10);
+            const res = await fetch(`${API_BASE}/${LEADS_TABLE}/records`, {
+                method: 'POST',
+                headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+                body: JSON.stringify(batch)
+            });
+            if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
+            created += batch.length;
+            saveBtn.textContent = `⏳ Creando ${created}/${leadsToCreate.length}...`;
+        }
 
-        if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
+        const firstTime = new Date(startTime).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+        const lastTime = new Date(startTime.getTime() + (count - 1) * SPACING_MS).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+        const timeRange = count > 1 ? `${firstTime} → ${lastTime}` : firstTime;
 
-        feedback.innerHTML = '<span style="color: var(--success);">✅ Lead creado. Actualizando cola...</span>';
+        feedback.innerHTML = `<span style="color: var(--success);">✅ ${created} lead${created > 1 ? 's' : ''} programado${created > 1 ? 's' : ''}: ${timeRange}</span>`;
 
-        // Wait for NocoDB to persist the record before re-fetching
-        console.log('[TestLead] Waiting 1.5s for NocoDB to persist...');
-        await new Promise(r => setTimeout(r, 1500));
+        // Refresh UI
+        await new Promise(r => setTimeout(r, 1000));
         invalidateLeadsCache();
-        console.log('[TestLead] Cache invalidated, calling renderScheduledCallsInScheduler...');
         await renderScheduledCallsInScheduler();
-        console.log('[TestLead] renderScheduledCallsInScheduler completed');
         fetchSchedulerKPIs();
-
-        feedback.innerHTML = '<span style="color: var(--success);">✅ Lead programado en 1ª posición de la cola.</span>';
 
         setTimeout(() => {
             document.getElementById('test-lead-modal').classList.remove('active');
-        }, 2000);
+        }, 2500);
 
     } catch (err) {
-        console.error('Error saving test lead:', err);
+        console.error('Error saving test leads:', err);
         feedback.innerHTML = `<span style="color: var(--danger);">Error: ${err.message}</span>`;
     } finally {
         saveBtn.disabled = false;
-        saveBtn.textContent = '💾 Guardar y Añadir a Base de Datos';
+        saveBtn.textContent = '💾 Crear y Programar';
     }
 });
 
@@ -2650,9 +3064,11 @@ function updateLeadsKPIs(leads) {
 function animateKPIValue(id, targetValue) {
     const el = document.getElementById(id);
     if (!el) return;
+    // Use data attribute for start value to prevent mid-animation reads causing overflow
+    const startVal = parseInt(el.getAttribute('data-kpi-target')) || 0;
+    el.setAttribute('data-kpi-target', targetValue);
     const duration = 600;
     const start = performance.now();
-    const startVal = parseInt(el.textContent) || 0;
     function step(now) {
         const progress = Math.min((now - start) / duration, 1);
         const eased = 1 - Math.pow(1 - progress, 3); // ease-out cubic
@@ -3234,6 +3650,14 @@ async function loadData(skipEnrichment = false) {
                 call.evaluation = 'Confirmada ✓';
             }
         });
+
+        // Retroactively classify disposition for calls that have an evaluation but no disposition
+        calls.forEach(call => {
+            if (!call.call_disposition && call.evaluation && call.evaluation !== 'Pendiente') {
+                call.call_disposition = classifyCallDisposition(call, call.transcript || '');
+            }
+        });
+
         allCalls = calls;
         currentCalls = calls;
 
@@ -3280,8 +3704,6 @@ async function loadData(skipEnrichment = false) {
             }, 100);
         }
 
-        const showConfirmedOnly = document.getElementById('filter-confirmed').checked;
-        const statusFilter = document.getElementById('filter-status').value;
         const companyFilter = document.getElementById('filter-company').value.toLowerCase();
         const scoreFilter = document.getElementById('filter-score').value;
         const dateRange = document.getElementById('date-range').value;
@@ -3295,22 +3717,16 @@ async function loadData(skipEnrichment = false) {
             );
         }
 
-        // Apply Status Filter (Success/Fail)
-        if (statusFilter === 'success') {
-            filteredCalls = filteredCalls.filter(c => getBadgeClass(c.evaluation) === 'success');
-        } else if (statusFilter === 'fail') {
-            filteredCalls = filteredCalls.filter(c => getBadgeClass(c.evaluation) === 'fail');
-        }
-
-        // Apply Confirmed Filter
         // Apply Score Filter
         if (scoreFilter !== 'all') {
             const [minS, maxS] = scoreFilter.split('-').map(Number);
             filteredCalls = filteredCalls.filter(c => (c._score || 0) >= minS && (c._score || 0) <= maxS);
         }
 
-        if (showConfirmedOnly) {
-            filteredCalls = filteredCalls.filter(c => isConfirmed(c));
+        // Apply Disposition Filter
+        const dispositionFilter = document.getElementById('filter-disposition')?.value || 'all';
+        if (dispositionFilter !== 'all') {
+            filteredCalls = filteredCalls.filter(c => c.call_disposition === dispositionFilter);
         }
 
         // Apply Date Filter
@@ -3330,14 +3746,15 @@ async function loadData(skipEnrichment = false) {
         const confirmedCalls = campaignCalls.filter(c => isConfirmed(c)).length;
         const confirmationRate = totalCalls > 0 ? Math.round((confirmedCalls / totalCalls) * 100) : 0;
 
-        const successCalls = campaignCalls.filter(c => getBadgeClass(c.evaluation) === 'success').length;
-        const successRate = totalCalls > 0 ? Math.round((successCalls / totalCalls) * 100) : 0;
+        // Interested = Interesado + Cita Agendada dispositions
+        const interestedCalls = campaignCalls.filter(c => c.call_disposition === 'Interesado' || c.call_disposition === 'Cita Agendada').length;
+        const interestedRate = totalCalls > 0 ? Math.round((interestedCalls / totalCalls) * 100) : 0;
         const totalDuration = campaignCalls.reduce((sum, c) => sum + (parseInt(c.duration_seconds) || 0), 0);
         const avgDuration = totalCalls > 0 ? Math.round(totalDuration / totalCalls) : 0;
         const avgScore = totalCalls > 0 ? Math.round(campaignCalls.reduce((sum, c) => sum + (c._score || 0), 0) / totalCalls) : 0;
 
         document.getElementById('total-calls').textContent = totalCalls;
-        document.getElementById('success-rate').textContent = successRate + '%';
+        document.getElementById('interested-rate').textContent = interestedRate + '%';
         document.getElementById('avg-duration').textContent = formatDuration(avgDuration);
         document.getElementById('avg-score').textContent = avgScore;
         const avgScoreLabel = getScoreLabel(avgScore);
@@ -3352,7 +3769,7 @@ async function loadData(skipEnrichment = false) {
         const paginationContainer = document.getElementById('call-pagination');
 
         if (filteredCalls.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="12" class="empty-state">No hay llamadas registradas que coincidan con el filtro</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No hay llamadas registradas que coincidan con el filtro</td></tr>';
             if (paginationContainer) paginationContainer.innerHTML = '';
         } else {
             tbody.innerHTML = '';
@@ -3406,7 +3823,7 @@ async function loadData(skipEnrichment = false) {
             function renderCallRow(call, index, isRetry = false, parentCall = null) {
                 const tr = document.createElement('tr');
                 const vapiId = call.vapi_call_id || call.lead_id || call.id || call.Id || '-';
-                const shortId = vapiId.length > 20 ? vapiId.substring(0, 8) + '...' : vapiId;
+                const shortId = vapiId;
 
                 const confirmed = isConfirmed(call);
                 if (confirmed) tr.classList.add('confirmed-row');
@@ -3483,12 +3900,10 @@ async function loadData(skipEnrichment = false) {
                     <td data-label="Empresa">${empresaCell}</td>
                     <td data-label="Teléfono" class="phone">${call.phone_called || '-'}</td>
                     <td data-label="Fecha">${formatDate(call.call_time || call.CreatedAt)}</td>
-                    <td data-label="Resultado">${isUnenriched ? placeholderSpan : resultadoCell}</td>
-                    <td data-label="Evaluación">${isUnenriched ? '<span class="badge unenriched-badge">⏳ Cargando...</span>' : `<span class="badge ${getBadgeClass(call.evaluation)}">${call.evaluation || 'Pendiente'}</span>`}</td>
+                    <td data-label="Disposición">${isUnenriched ? '<span class="badge unenriched-badge">⏳ Cargando...</span>' : (() => { const dp = getDispositionProps(call.call_disposition); return call.call_disposition ? `<span class="badge disposition-badge ${dp.cls}">${dp.icon} ${call.call_disposition}</span>` : '<span class="badge disposition-badge disposition-unknown">❓ Pendiente</span>'; })()}</td>
                     <td data-label="Duración">${isUnenriched ? placeholderSpan : formatDuration(call.duration_seconds)}</td>
                     <td data-label="Score">${isUnenriched ? placeholderSpan : `<span class="score-badge ${scoreLbl.cls}" style="--score-color: ${scoreClr}">${scoreLbl.emoji} ${scoreVal}</span>`}</td>
                     <td data-label="Notas" class="table-notes">${call.Notes ? `<span class="note-indicator" data-index="${index}" title="${call.Notes}" style="cursor: pointer;">📝</span>` : '-'}</td>
-                    <td data-label="Confirmado">${isUnenriched ? placeholderSpan : confirmedCell}</td>
                 `;
                 return tr;
             }
@@ -3548,7 +3963,7 @@ async function loadData(skipEnrichment = false) {
                 </div>`;
         }
 
-        document.getElementById('call-table').innerHTML = `<tr><td colspan="12" style="padding:40px 20px;text-align:center;">
+        document.getElementById('call-table').innerHTML = `<tr><td colspan="9" style="padding:40px 20px;text-align:center;">
             <div style="max-width:500px;margin:0 auto;">
                 <div style="font-size:40px;margin-bottom:12px;">⚠️</div>
                 <div style="font-size:16px;font-weight:600;color:var(--danger);margin-bottom:8px;">Error al cargar datos</div>
@@ -3581,7 +3996,7 @@ function renderTestCalls(testCalls) {
     document.getElementById('test-voicemail').textContent = voicemail;
 
     if (total === 0) {
-        tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No hay llamadas de test registradas. Las llamadas manuales aparecerán aquí.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No hay llamadas de test registradas. Las llamadas manuales aparecerán aquí.</td></tr>';
         return;
     }
 
@@ -3589,7 +4004,7 @@ function renderTestCalls(testCalls) {
     testCalls.forEach((call, idx) => {
         const tr = document.createElement('tr');
         const vapiId = call.vapi_call_id || call.lead_id || call.id || call.Id || '-';
-        const shortId = vapiId.length > 20 ? vapiId.substring(0, 8) + '...' : vapiId;
+        const shortId = vapiId;
 
         const confirmed = isConfirmed(call);
         if (confirmed) tr.classList.add('confirmed-row');
@@ -3616,11 +4031,9 @@ function renderTestCalls(testCalls) {
             <td data-label="Empresa"><strong>${call.lead_name || '-'}</strong></td>
             <td data-label="Teléfono" class="phone">${call.phone_called || '-'}</td>
             <td data-label="Fecha">${formatDate(call.call_time || call.CreatedAt)}</td>
-            <td data-label="Resultado">${call.ended_reason || '-'}</td>
-            <td data-label="Evaluación"><span class="badge ${getBadgeClass(call.evaluation)}">${call.evaluation || 'Pendiente'}</span></td>
+            <td data-label="Disposición">${(() => { const dp = getDispositionProps(call.call_disposition); return call.call_disposition ? `<span class="badge disposition-badge ${dp.cls}">${dp.icon} ${call.call_disposition}</span>` : '<span class="badge disposition-badge disposition-unknown">❓ Pendiente</span>'; })()}</td>
             <td data-label="Duración">${formatDuration(call.duration_seconds)}</td>
             <td data-label="Score"><span class="score-badge ${scoreLbl.cls}" style="--score-color: ${scoreClr}">${scoreLbl.emoji} ${scoreVal}</span></td>
-            <td data-label="Confirmado">${confirmedCell}</td>
         `;
         tbody.appendChild(tr);
     });
@@ -3659,7 +4072,7 @@ async function saveNotes() {
         const res = await fetch(`${API_BASE}/${CALL_LOGS_TABLE}/records`, {
             method: 'PATCH',
             headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
-            body: JSON.stringify([{ id: id, Notes: notes }])
+            body: JSON.stringify([{ Id: id, Notes: notes }])
         });
 
         if (res.ok) {
@@ -3689,7 +4102,7 @@ async function toggleTestStatus(callId, markAsTest) {
         const res = await fetch(`${API_BASE}/${CALL_LOGS_TABLE}/records`, {
             method: 'PATCH',
             headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
-            body: JSON.stringify([{ id: parseInt(callId), is_test: markAsTest }])
+            body: JSON.stringify([{ Id: parseInt(callId), is_test: markAsTest }])
         });
 
         if (res.ok) {
@@ -3717,7 +4130,7 @@ async function toggleContestadorStatus(callId, phone) {
         const res = await fetch(`${API_BASE}/${CALL_LOGS_TABLE}/records`, {
             method: 'PATCH',
             headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
-            body: JSON.stringify([{ id: parseInt(callId), evaluation: 'Contestador' }])
+            body: JSON.stringify([{ Id: parseInt(callId), evaluation: 'Contestador' }])
         });
 
         if (!res.ok) throw new Error('Error al actualizar call_logs');
@@ -3843,10 +4256,9 @@ function renderPagination(totalItems, currentPage, pageSize, totalPages) {
 
 // Event listeners
 document.getElementById('refresh-btn').addEventListener('click', loadData);
-document.getElementById('filter-confirmed').addEventListener('change', () => { paginationPage = 1; loadData(); });
-document.getElementById('filter-status').addEventListener('change', () => { paginationPage = 1; loadData(); });
 document.getElementById('filter-company').addEventListener('input', () => { paginationPage = 1; loadData(); });
 document.getElementById('filter-score').addEventListener('change', () => { paginationPage = 1; loadData(); });
+if (document.getElementById('filter-disposition')) document.getElementById('filter-disposition').addEventListener('change', () => { paginationPage = 1; loadData(); });
 document.getElementById('close-modal').addEventListener('click', closeModal);
 document.getElementById('save-notes-btn').addEventListener('click', saveNotes);
 
@@ -4208,7 +4620,7 @@ async function triggerManualCall() {
         // ⚠️ CRITICAL: Check concurrency limit before launching
         log('⏳', 'Comprobando llamadas activas en Vapi...');
         try {
-            const checkRes = await fetch('https://api.vapi.ai/call?limit=100', {
+            const checkRes = await fetch(`${VAPI_API_BASE}/call?limit=100`, {
                 headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
             });
             if (checkRes.ok) {
@@ -4256,8 +4668,10 @@ async function triggerManualCall() {
                     variableValues: {
                         nombre: name,
                         tel_contacto: extPhone,
-                        localidad: locality,
-                        leadId: 'manual_' + Date.now()
+                        ciudad: locality,
+                        leadId: 'manual_' + Date.now(),
+                        fecha_hoy: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Madrid' }),
+                        dia_semana: new Date().toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid', weekday: 'long' })
                     }
                 }
             };
@@ -4267,7 +4681,7 @@ async function triggerManualCall() {
             payloadPre.textContent = JSON.stringify(vapiPayload, null, 2);
             feedback.appendChild(payloadPre);
 
-            const vapiRes = await fetch('https://api.vapi.ai/call', {
+            const vapiRes = await fetch(`${VAPI_API_BASE}/call`, {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${VAPI_API_KEY}`,
@@ -4314,7 +4728,7 @@ async function triggerManualCall() {
             while (Date.now() - pollStart < POLL_DURATION) {
                 await new Promise(r => setTimeout(r, POLL_INTERVAL));
                 try {
-                    const statusRes = await fetch(`https://api.vapi.ai/call/${callId}`, {
+                    const statusRes = await fetch(`${VAPI_API_BASE}/call/${callId}`, {
                         headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
                     });
                     const statusData = await statusRes.json();
@@ -4531,7 +4945,7 @@ window._retryCall = async function () {
 
     try {
         // 1. Get previous call details from Vapi
-        const vapiRes = await fetch(`https://api.vapi.ai/call/${vapiId}`, {
+        const vapiRes = await fetch(`${VAPI_API_BASE}/call/${vapiId}`, {
             headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
         });
         if (!vapiRes.ok) throw new Error('No se pudo obtener la llamada anterior');
@@ -4608,7 +5022,7 @@ ${transcript || 'No disponible'}
 
         // 5. Check concurrency
         retryFeedback.textContent = '⏳ Verificando disponibilidad...';
-        const checkRes = await fetch('https://api.vapi.ai/call?limit=100', {
+        const checkRes = await fetch(`${VAPI_API_BASE}/call?limit=100`, {
             headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
         });
         if (checkRes.ok) {
@@ -4625,7 +5039,7 @@ ${transcript || 'No disponible'}
 
         // 6. Get current assistant config for the model override
         retryFeedback.textContent = '⏳ Preparando rellamada...';
-        const assistantRes = await fetch(`https://api.vapi.ai/assistant/${VAPI_ASSISTANT_ID}`, {
+        const assistantRes = await fetch(`${VAPI_API_BASE}/assistant/${VAPI_ASSISTANT_ID}`, {
             headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
         });
         const assistant = await assistantRes.json();
@@ -4635,7 +5049,7 @@ ${transcript || 'No disponible'}
         retryFeedback.textContent = '🚀 Lanzando rellamada...';
         const formattedPhone = normalizePhone(phone);
 
-        const callRes = await fetch('https://api.vapi.ai/call', {
+        const callRes = await fetch(`${VAPI_API_BASE}/call`, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${VAPI_API_KEY}`,
@@ -4657,7 +5071,10 @@ ${transcript || 'No disponible'}
                     variableValues: {
                         nombre: customerName || activeDetailCall.lead_name || 'Cliente',
                         empresa: activeDetailCall.lead_name || '',
-                        tel_contacto: formattedPhone
+                        tel_contacto: formattedPhone,
+                        ciudad: activeDetailCall.locality || activeDetailCall.address || 'tu zona',
+                        fecha_hoy: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Madrid' }),
+                        dia_semana: new Date().toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid', weekday: 'long' })
                     }
                 }
             })
@@ -5042,7 +5459,7 @@ async function fetchRealtimeCalls(badgeOnly = false) {
         if (!badgeOnly && statusText) statusText.textContent = 'Escaneando...';
 
         // Fetch recent calls from Vapi
-        const res = await fetch(`https://api.vapi.ai/call?limit=100`, {
+        const res = await fetch(`${VAPI_API_BASE}/call?limit=100`, {
             headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
         });
 
@@ -5235,7 +5652,7 @@ function renderRealtimeCalls(liveCalls, todayCalls) {
 
 async function fetchCallTranscript(callId) {
     try {
-        const res = await fetch(`https://api.vapi.ai/call/${callId}`, {
+        const res = await fetch(`${VAPI_API_BASE}/call/${callId}`, {
             headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
         });
 
@@ -5583,7 +6000,7 @@ async function loadAgentPrompt() {
     feedback.className = '';
 
     try {
-        const res = await fetch(`https://api.vapi.ai/assistant/${assistantId}`, {
+        const res = await fetch(`${VAPI_API_BASE}/assistant/${assistantId}`, {
             headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
         });
         if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
@@ -5661,7 +6078,7 @@ async function saveAgentPrompt() {
             updates.instructions = newPrompt;
         }
 
-        const res = await fetch(`https://api.vapi.ai/assistant/${assistantId}`, {
+        const res = await fetch(`${VAPI_API_BASE}/assistant/${assistantId}`, {
             method: 'PATCH',
             headers: {
                 'Authorization': `Bearer ${VAPI_API_KEY}`,
@@ -6043,7 +6460,7 @@ function renderChangelog() {
 // ═══════════════════════════════════════════════════════════════
 
 const ADMIN_USERS_TABLE = 'mkb040wimke95sl';
-const ADMIN_NOCODB_BASE = 'https://optima-nocodb.vhsxer.easypanel.host/api/v2/tables';
+const ADMIN_NOCODB_BASE = `${NOCODB_PROXY_BASE}/api/v2/tables`;
 const ADMIN_XC_TOKEN = 'vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d';
 
 let _adminUsers = [];

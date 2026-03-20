@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 const VAPI_API_KEY = '852080ba-ce7c-4778-b218-bf718613a2b6';
 const ASSISTANT_ID = '49e56db1-1f20-4cf1-b031-9cea9fba73cb';
-const PHONE_NUMBER_ID = '611c8c8e-ab43-4af0-8df0-f2f8fac8115b';
+const PHONE_NUMBER_ID = 'ee153e9d-ece6-4469-a634-70eaa6e083c4';
 
 const phone = process.argv[2] || '+34666532143';
 

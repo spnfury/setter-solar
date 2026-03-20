@@ -16,17 +16,19 @@ const CALL_LOGS_TABLE = 'm73w58ba47ifkrx';
 const XC_TOKEN = 'vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d';
 
 const VAPI_API_KEY = '0594f41c-e836-425d-aaa2-1c5b7d9e506e';
-const VAPI_PHONE_NUMBER_ID = 'b3b47ab7-b74b-46b9-bf72-0f82d6731f56';
+const VAPI_PHONE_NUMBER_ID = 'ee153e9d-ece6-4469-a634-70eaa6e083c4';
 
 const ASSISTANTS = {
     carolina: 'f3359bb0-7bc4-45c7-9a02-ca4793cc5d48',
     marcos: 'f34469b5-334e-4fbf-b5ad-b2b05e8d76ee'
 };
 
-const MAX_CONCURRENT_CALLS = 10;
-const DELAY_BETWEEN_CALLS_MS = 10000; // 10 seconds between calls — prevents SIP 503 errors
+const MAX_CONCURRENT_CALLS = 3;  // ⚠️ SIP trunk limit is ~10, but 3 is safe to avoid errors
+const DELAY_BETWEEN_CALLS_MS = 15000; // 15 seconds between calls — prevents SIP 503 errors
 const CONCURRENCY_CHECK_INTERVAL_MS = 15000; // 15 seconds wait when at max concurrency
 const MAX_CONCURRENCY_RETRIES = 40; // 40 * 15s = 10 minutes max wait
+const RECENT_CALL_WINDOW_MS = 30 * 60 * 1000; // 30 minutes — skip numbers called recently
+const MAX_SIP_FAILURES_PER_NUMBER = 2; // Skip numbers that failed 2+ times today
 
 // Parse args
 const args = process.argv.slice(2);
@@ -48,55 +50,162 @@ function sleep(ms) {
 /**
  * Query Vapi API for the number of currently active calls.
  * Active = queued, ringing, or in-progress.
+ * Also returns the set of phone numbers currently in active calls.
  */
-async function getActiveCallCount() {
+async function getActiveCallInfo() {
     try {
         const res = await fetch('https://api.vapi.ai/call?limit=100', {
             headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
         });
         if (!res.ok) {
             console.warn(`   ⚠️ Error checking active calls: HTTP ${res.status}`);
-            return -1;
+            return { count: -1, activePhones: new Set() };
         }
         const calls = await res.json();
         const activeCalls = (Array.isArray(calls) ? calls : []).filter(c =>
             ['queued', 'ringing', 'in-progress'].includes(c.status)
         );
-        return activeCalls.length;
+        const activePhones = new Set(activeCalls.map(c => c.customer?.number).filter(Boolean));
+        return { count: activeCalls.length, activePhones };
     } catch (err) {
         console.warn(`   ⚠️ Error checking active calls: ${err.message}`);
-        return -1;
+        return { count: -1, activePhones: new Set() };
+    }
+}
+
+async function getActiveCallCount() {
+    const info = await getActiveCallInfo();
+    return info.count;
+}
+
+/**
+ * Fetch phones called in the last RECENT_CALL_WINDOW_MS from Vapi.
+ * Returns a Set of normalized phone numbers.
+ * This provides cross-session dedup (n8n + script + manual).
+ */
+async function fetchRecentCallPhonesFromVapi() {
+    try {
+        const res = await fetch('https://api.vapi.ai/call?limit=100', {
+            headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
+        });
+        if (!res.ok) {
+            console.warn('   ⚠️ Could not fetch recent calls for dedup.');
+            return new Set();
+        }
+        const calls = await res.json();
+        const cutoff = Date.now() - RECENT_CALL_WINDOW_MS;
+        const recentPhones = new Set();
+        for (const c of (Array.isArray(calls) ? calls : [])) {
+            const created = new Date(c.createdAt).getTime();
+            if (created >= cutoff && c.customer?.number) {
+                recentPhones.add(c.customer.number);
+            }
+        }
+        return recentPhones;
+    } catch (err) {
+        console.warn(`   ⚠️ Error fetching recent calls for dedup: ${err.message}`);
+        return new Set();
+    }
+}
+
+/**
+ * Fetch phones that have failed with SIP errors 2+ times today.
+ * Returns a Set of normalized phone numbers to skip.
+ */
+async function fetchTodayFailedPhones() {
+    try {
+        const res = await fetch('https://api.vapi.ai/call?limit=100', {
+            headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
+        });
+        if (!res.ok) return new Set();
+        const calls = await res.json();
+
+        const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Madrid' });
+        const failCounts = {};
+
+        for (const c of (Array.isArray(calls) ? calls : [])) {
+            const callDate = c.createdAt?.substring(0, 10);
+            if (callDate !== today) continue;
+            const reason = c.endedReason || '';
+            if (reason.includes('error-sip') || reason.includes('error-providerfault')) {
+                const phone = c.customer?.number;
+                if (phone) {
+                    failCounts[phone] = (failCounts[phone] || 0) + 1;
+                }
+            }
+        }
+
+        const blockedPhones = new Set();
+        for (const [phone, count] of Object.entries(failCounts)) {
+            if (count >= MAX_SIP_FAILURES_PER_NUMBER) {
+                blockedPhones.add(phone);
+            }
+        }
+        return blockedPhones;
+    } catch (err) {
+        console.warn(`   ⚠️ Error fetching failed phones: ${err.message}`);
+        return new Set();
+    }
+}
+
+/**
+ * Update lead status in NocoDB when a call fails with SIP error.
+ * Resets "Llamando..." → "Fallida - SIP" so the dashboard is accurate.
+ */
+async function updateLeadStatusOnFailure(lead, sipReason) {
+    try {
+        await fetch(`${API_BASE}/${LEADS_TABLE}/records`, {
+            method: 'PATCH',
+            headers: {
+                'xc-token': XC_TOKEN,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify([{
+                unique_id: lead.unique_id,
+                status: `Fallida - ${sipReason || 'SIP'}`,
+                fecha_planificada: null
+            }])
+        });
+    } catch (err) {
+        console.warn(`   ⚠️ Error updating lead status after SIP failure: ${err.message}`);
     }
 }
 
 /**
  * Wait until there's a free slot (active calls < MAX_CONCURRENT_CALLS).
- * Returns true if a slot is available, false if we timed out.
+ * Also checks that the target phone is not already in an active call.
+ * Returns { available: true/false, activePhones: Set }
  */
-async function waitForAvailableSlot() {
+async function waitForAvailableSlot(targetPhone) {
     for (let attempt = 0; attempt < MAX_CONCURRENCY_RETRIES; attempt++) {
-        const activeCount = await getActiveCallCount();
+        const info = await getActiveCallInfo();
 
-        if (activeCount === -1) {
+        if (info.count === -1) {
             console.log(`   ⚠️ Could not verify concurrency. Waiting ${CONCURRENCY_CHECK_INTERVAL_MS / 1000}s to retry...`);
             await sleep(CONCURRENCY_CHECK_INTERVAL_MS);
             continue;
         }
 
-        if (activeCount < MAX_CONCURRENT_CALLS) {
+        // Check if target phone is already in an active call
+        if (targetPhone && info.activePhones.has(targetPhone)) {
+            console.log(`   🚫 Phone ${targetPhone} already has an active call. Skipping.`);
+            return { available: false, reason: 'phone_active' };
+        }
+
+        if (info.count < MAX_CONCURRENT_CALLS) {
             if (attempt > 0) {
-                console.log(`   ✅ Slot available! Active calls: ${activeCount}/${MAX_CONCURRENT_CALLS}`);
+                console.log(`   ✅ Slot available! Active calls: ${info.count}/${MAX_CONCURRENT_CALLS}`);
             }
-            return true;
+            return { available: true };
         }
 
         const now = new Date().toLocaleTimeString('es-ES', { timeZone: 'Europe/Madrid', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        console.log(`   🚫 [${now}] Concurrency limit: ${activeCount}/${MAX_CONCURRENT_CALLS} active. Waiting ${CONCURRENCY_CHECK_INTERVAL_MS / 1000}s... (${attempt + 1}/${MAX_CONCURRENCY_RETRIES})`);
+        console.log(`   🚫 [${now}] Concurrency limit: ${info.count}/${MAX_CONCURRENT_CALLS} active. Waiting ${CONCURRENCY_CHECK_INTERVAL_MS / 1000}s... (${attempt + 1}/${MAX_CONCURRENCY_RETRIES})`);
         await sleep(CONCURRENCY_CHECK_INTERVAL_MS);
     }
 
     console.error(`   ❌ Timed out waiting for a free slot after ${MAX_CONCURRENCY_RETRIES} attempts.`);
-    return false;
+    return { available: false, reason: 'timeout' };
 }
 
 async function fetchAllLeads() {
@@ -109,9 +218,14 @@ async function fetchAllLeads() {
 
 async function callLead(lead) {
     const phone = normalizePhone(lead.phone);
-    const name = lead.name || 'Empresa';
+    let name = (lead.name || '').trim();
+    const validName = name.length >= 2 && name.toLowerCase() !== 'empresa';
+    
+    // Si no hay nombre válido, usamos un nombre genérico para referirnos a él, pero no lo pronunciamos
+    const nombreVariables = validName ? name : 'el titular de la vivienda';
+    const firstGreeting = validName ? `¡Hola! ¿Hablo con ${name}?` : '¡Hola! Buenas tardes. Soy Carolina de Setter Solar.';
 
-    console.log(`  📞 Llamando a ${name} (${phone})...`);
+    console.log(`  📞 Llamando a ${validName ? name : phone} (${phone})...`);
 
     if (DRY_RUN) {
         console.log(`  ✅ [DRY RUN] Se llamaría a ${name} (${phone})`);
@@ -135,12 +249,15 @@ async function callLead(lead) {
                     assistantId: ASSISTANT_ID,
                     phoneNumberId: VAPI_PHONE_NUMBER_ID,
                     assistantOverrides: {
+                        firstMessage: firstGreeting,
                         variableValues: {
-                            nombre: name,
-                            empresa: lead.name || '',
+                            nombre: nombreVariables,
+                            empresa: name || '',
                             tel_contacto: phone,
-                            localidad: lead.Localidad || 'tu zona',
-                            leadId: lead.unique_id || ''
+                            ciudad: lead.Localidad || lead.address || 'tu zona',
+                            leadId: lead.unique_id || '',
+                            fecha_hoy: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Madrid' }),
+                            dia_semana: new Date().toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid', weekday: 'long' })
                         }
                     }
                 })
@@ -165,7 +282,9 @@ async function callLead(lead) {
                     continue; // Retry
                 }
 
+                // ⚠️ AUTO-RECOVERY: Reset lead status from "Llamando..." to "Fallida - SIP"
                 console.log(`  ❌ Error Vapi para ${name}: ${errMsg}`);
+                await updateLeadStatusOnFailure(lead, isSipError ? 'SIP' : 'API');
                 return { success: false, error: errMsg, lead };
             }
 
@@ -273,29 +392,73 @@ async function main() {
 
     console.log(`📦 Processing ${eligible.length} calls sequentially with concurrency check\n`);
 
+    // ⚠️ GLOBAL DEDUP: Fetch recently-called phones from Vapi API (cross-session dedup)
+    console.log('🔍 Checking recently called numbers (cross-session dedup)...');
+    const recentlyCalledPhones = await fetchRecentCallPhonesFromVapi();
+    if (recentlyCalledPhones.size > 0) {
+        console.log(`   Found ${recentlyCalledPhones.size} numbers called in the last ${RECENT_CALL_WINDOW_MS / 60000} min.`);
+    }
+
+    // ⚠️ BLACKLIST: Fetch phones with 2+ SIP failures today
+    console.log('🔍 Checking numbers with repeated SIP failures today...');
+    const sipBlacklist = await fetchTodayFailedPhones();
+    if (sipBlacklist.size > 0) {
+        console.log(`   🚫 ${sipBlacklist.size} numbers blacklisted (${MAX_SIP_FAILURES_PER_NUMBER}+ SIP failures today).`);
+    }
+
     // 3. Process each call sequentially, checking concurrency before each one
     const allResults = [];
     let skipped = 0;
+    const calledPhones = new Set(); // Track phones called in this session to avoid duplicates
 
     for (let i = 0; i < eligible.length; i++) {
         const lead = eligible[i];
         const name = lead.name || 'Empresa';
+        const phone = normalizePhone(lead.phone);
         const now = new Date().toLocaleTimeString('es-ES', { timeZone: 'Europe/Madrid', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
         console.log(`\n[${i + 1}/${eligible.length}] ${now} — ${name}`);
         console.log('─'.repeat(50));
 
-        // ⚠️ CRITICAL: Check concurrency before EVERY call
+        // ⚠️ RULE: Never call the same number twice in one session
+        if (calledPhones.has(phone)) {
+            console.log(`  ⏭️  Skipping ${name} (${phone}) — same number already called in this session.`);
+            allResults.push({ success: false, error: 'Duplicate phone in session', lead });
+            skipped++;
+            continue;
+        }
+
+        // ⚠️ GLOBAL DEDUP: Skip if called recently by any source (n8n, another script, etc.)
+        if (recentlyCalledPhones.has(phone)) {
+            console.log(`  ⏭️  Skipping ${name} (${phone}) — already called in last ${RECENT_CALL_WINDOW_MS / 60000} min (cross-session dedup).`);
+            allResults.push({ success: false, error: 'Recently called (cross-session dedup)', lead });
+            skipped++;
+            continue;
+        }
+
+        // ⚠️ BLACKLIST: Skip numbers with repeated SIP failures today
+        if (sipBlacklist.has(phone)) {
+            console.log(`  ⏭️  Skipping ${name} (${phone}) — ${MAX_SIP_FAILURES_PER_NUMBER}+ SIP failures today. Will retry tomorrow.`);
+            allResults.push({ success: false, error: `SIP blacklisted (${MAX_SIP_FAILURES_PER_NUMBER}+ failures today)`, lead });
+            skipped++;
+            continue;
+        }
+
+        // ⚠️ CRITICAL: Check concurrency + active phone before EVERY call
         if (!DRY_RUN) {
-            const slotAvailable = await waitForAvailableSlot();
-            if (!slotAvailable) {
-                console.log(`  ⏭️  Skipping ${name} — could not get a free slot.`);
-                allResults.push({ success: false, error: 'Concurrency timeout', lead });
+            const slot = await waitForAvailableSlot(phone);
+            if (!slot.available) {
+                const reason = slot.reason === 'phone_active'
+                    ? `Phone ${phone} already in active call`
+                    : 'Concurrency timeout';
+                console.log(`  ⏭️  Skipping ${name} — ${reason}`);
+                allResults.push({ success: false, error: reason, lead });
                 skipped++;
                 continue;
             }
         }
 
+        calledPhones.add(phone);
         const result = await callLead(lead);
         allResults.push(result);
 

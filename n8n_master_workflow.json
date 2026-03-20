@@ -3,163 +3,6 @@
     "nodes": [
         {
             "parameters": {
-                "httpMethod": "POST",
-                "path": "vapi-calendar",
-                "options": {}
-            },
-            "id": "vapi-webhook",
-            "name": "Webhook Vapi",
-            "type": "n8n-nodes-base.webhook",
-            "typeVersion": 1.1,
-            "position": [
-                400,
-                300
-            ]
-        },
-        {
-            "parameters": {
-                "jsCode": "const body = $input.first().json.body || $input.first().json;\n\n// Handle Vapi Tool Call OR Call Update (ended call with structured data)\nlet args = {};\nlet callId = '';\nlet toolCallId = '';\n\nif (body.message) {\n  const msg = body.message;\n  callId = msg.call?.id || '';\n  \n  if (msg.type === 'tool-calls') {\n    const toolCall = msg.toolCalls[0];\n    toolCallId = toolCall.id || '';\n    args = typeof toolCall.function.arguments === 'string' \n      ? JSON.parse(toolCall.function.arguments) \n      : toolCall.function.arguments;\n  } else if (msg.type === 'call-update' && msg.call?.status === 'ended') {\n    args = msg.call.analysis?.structuredData || {};\n  }\n}\n\nreturn {\n  datetime: args.datetime,\n  clientName: args.clientName,\n  clientPhone: args.clientPhone,\n  leadId: args.leadId || args.lead_id,\n  callId: callId || args.callId,\n  toolCallId: toolCallId\n};"
-            },
-            "id": "extract-data",
-            "name": "Extract Data",
-            "type": "n8n-nodes-base.code",
-            "typeVersion": 2,
-            "position": [
-                600,
-                300
-            ]
-        },
-        {
-            "parameters": {
-                "calendar": {
-                    "__rl": true,
-                    "value": "primary",
-                    "mode": "list"
-                },
-                "start": "={{ $json.datetime }}",
-                "end": "={{ $json.datetime }}",
-                "summary": "=Cita Solar: {{ $json.clientName }}",
-                "description": "=Visita técnica concertada por la asistente virtual.\nCliente: {{ $json.clientName }}\nTeléfono: {{ $json.clientPhone }}\nLead ID: {{ $json.leadId }}",
-                "additionalFields": {}
-            },
-            "id": "google-calendar",
-            "name": "Google Calendar",
-            "type": "n8n-nodes-base.googleCalendar",
-            "typeVersion": 1.1,
-            "position": [
-                800,
-                200
-            ],
-            "credentials": {
-                "googleCalendarOAuth2Api": {
-                    "id": "new-oauth2-id-placeholder",
-                    "name": "Google Calendar OAuth2-V2"
-                }
-            },
-            "onError": "continue"
-        },
-        {
-            "parameters": {
-                "authentication": "nocoDbApiToken",
-                "operation": "create",
-                "projectId": "p5xxqp29w9h8sb6",
-                "table": "mn8z0l3b8h8ii9y",
-                "dataToSend": "defineBelow",
-                "fieldsToSend": {
-                    "properties": [
-                        {
-                            "id": "Nombre Confirmado",
-                            "name": "Nombre Confirmado",
-                            "value": "={{ $json.clientName }}"
-                        },
-                        {
-                            "id": "Teléfono Confirmado",
-                            "name": "Teléfono Confirmado",
-                            "value": "={{ $json.clientPhone }}"
-                        },
-                        {
-                            "id": "Fecha Cita",
-                            "name": "Fecha Cita",
-                            "value": "={{ $json.datetime }}"
-                        },
-                        {
-                            "id": "Vapi Call ID",
-                            "name": "Vapi Call ID",
-                            "value": "={{ $json.callId }}"
-                        }
-                    ]
-                }
-            },
-            "id": "nocodb-insert-confirmed",
-            "name": "NocoDB Confirmed",
-            "type": "n8n-nodes-base.nocoDb",
-            "typeVersion": 3,
-            "position": [
-                1000,
-                300
-            ],
-            "credentials": {
-                "nocoDbApiToken": {
-                    "id": "tV5VwP4BVmME7Vgo",
-                    "name": "NocoDB Token account"
-                }
-            }
-        },
-        {
-            "parameters": {
-                "authentication": "nocoDbApiToken",
-                "operation": "update",
-                "projectId": "p5xxqp29w9h8sb6",
-                "table": "mf0wzufqcpi3bd1",
-                "rowId": "={{ $json.leadId }}",
-                "dataToSend": "defineBelow",
-                "fieldsToSend": {
-                    "properties": [
-                        {
-                            "id": "status",
-                            "name": "status",
-                            "value": "Cita Concertada"
-                        },
-                        {
-                            "id": "notes",
-                            "name": "notes",
-                            "value": "=Asistenta agendó cita para el {{ $json.datetime }}"
-                        }
-                    ]
-                }
-            },
-            "id": "nocodb-update-lead",
-            "name": "NocoDB Update Lead",
-            "type": "n8n-nodes-base.nocoDb",
-            "typeVersion": 3,
-            "position": [
-                1200,
-                300
-            ],
-            "credentials": {
-                "nocoDbApiToken": {
-                    "id": "tV5VwP4BVmME7Vgo",
-                    "name": "NocoDB Token account"
-                }
-            }
-        },
-        {
-            "parameters": {
-                "respondWith": "json",
-                "responseBody": "={{ JSON.stringify({ results: [{ toolCallId: $('Extract Data').item.json.toolCallId, result: 'Cita agendada correctamente para ' + $json.datetime }] }) }}",
-                "options": {}
-            },
-            "id": "webhook-response",
-            "name": "Respond to Vapi",
-            "type": "n8n-nodes-base.respondToWebhook",
-            "typeVersion": 1,
-            "position": [
-                1400,
-                300
-            ]
-        },
-        {
-            "parameters": {
                 "rule": {
                     "interval": [
                         {
@@ -172,10 +15,7 @@
             "id": "auto-schedule-trigger",
             "name": "Every 1 Min",
             "type": "n8n-nodes-base.scheduleTrigger",
-            "position": [
-                400,
-                600
-            ],
+            "position": [400, 600],
             "typeVersion": 1.1
         },
         {
@@ -185,10 +25,7 @@
                 "sendHeaders": true,
                 "headerParameters": {
                     "parameters": [
-                        {
-                            "name": "xc-token",
-                            "value": "vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d"
-                        }
+                        { "name": "xc-token", "value": "vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d" }
                     ]
                 },
                 "options": {}
@@ -197,24 +34,18 @@
             "name": "Get Programado Leads",
             "type": "n8n-nodes-base.httpRequest",
             "typeVersion": 4.2,
-            "position": [
-                600,
-                600
-            ],
+            "position": [600, 600],
             "onError": "continueRegularOutput"
         },
         {
             "parameters": {
-                "jsCode": "// ⚠️ BUSINESS HOURS GUARD: Only allow calls between 9:00 and 20:00 Europe/Madrid\nconst nowMadrid = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Madrid' }));\nconst currentHour = nowMadrid.getHours();\nif (currentHour < 9 || currentHour >= 20) {\n  return []; // Outside business hours — stop execution\n}\n\n// Extract leads from NocoDB response and filter only those that are due now\nconst input = $input.first().json;\nconst leads = input.list || [];\nconst now = new Date();\n\nconst dueLeads = leads.filter(lead => {\n  if (!lead.fecha_planificada) return false;\n  const plannedDate = new Date(lead.fecha_planificada);\n  return !isNaN(plannedDate.getTime()) && plannedDate <= now;\n});\n\nif (dueLeads.length === 0) {\n  return []; // No leads due — stop execution\n}\n\n// Return each due lead as a separate item for batch processing\nreturn dueLeads.map(lead => {\n  // Normalize phone number\n  let phone = String(lead.phone || '').replace(/\\D/g, '');\n  if (phone && !phone.startsWith('34')) phone = '34' + phone;\n  if (phone) phone = '+' + phone;\n\n  return {\n    json: {\n      leadId: lead.unique_id,\n      leadRowId: lead.Id,\n      name: lead.name || 'Cliente',\n      phone: phone,\n      address: lead.address || lead.Localidad || 'su localidad',\n      email: lead.email || '',\n      assistant_id: lead.assistant_id || '',\n      fecha_planificada: lead.fecha_planificada\n    }\n  };\n});"
+                "jsCode": "// ⚠️ BUSINESS HOURS GUARD: Only allow calls between 9:00 and 21:00 Europe/Madrid\nconst nowMadrid = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Madrid' }));\nconst currentHour = nowMadrid.getHours();\nif (currentHour < 9 || currentHour >= 21) {\n  return []; // Outside business hours — stop execution\n}\n\n// Extract leads from NocoDB response and filter only those that are due now\nconst input = $input.first().json;\nconst leads = input.list || [];\nconst now = new Date();\n\nconst dueLeads = leads.filter(lead => {\n  if (!lead.fecha_planificada) return false;\n  const plannedDate = new Date(lead.fecha_planificada);\n  return !isNaN(plannedDate.getTime()) && plannedDate <= now;\n});\n\nif (dueLeads.length === 0) {\n  return []; // No leads due — stop execution\n}\n\n// Calculate fecha_hoy and dia_semana in Madrid timezone\nconst fechaHoy = nowMadrid.toLocaleDateString('sv-SE');\nconst diaSemana = nowMadrid.toLocaleDateString('es-ES', { weekday: 'long' });\n\n// Return each due lead as a separate item for batch processing\nreturn dueLeads.map(lead => {\n  // Normalize phone number\n  let phone = String(lead.phone || '').replace(/\\\\D/g, '');\n  if (phone && !phone.startsWith('34')) phone = '34' + phone;\n  if (phone) phone = '+' + phone;\n\n  return {\n    json: {\n      leadId: lead.unique_id,\n      leadRowId: lead.Id,\n      name: lead.name || 'Cliente',\n      phone: phone,\n      address: lead.address || lead.Localidad || 'su localidad',\n      email: lead.email || '',\n      assistant_id: lead.assistant_id || '',\n      fecha_planificada: lead.fecha_planificada,\n      fecha_hoy: fechaHoy,\n      dia_semana: diaSemana\n    }\n  };\n});"
             },
             "id": "filter-due-leads",
             "name": "Filter Due Leads",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
-            "position": [
-                800,
-                600
-            ]
+            "position": [800, 600]
         },
         {
             "parameters": {
@@ -224,11 +55,8 @@
             "id": "batch-calls",
             "name": "One at a Time",
             "type": "n8n-nodes-base.splitInBatches",
-            "typeVersion": 3,
-            "position": [
-                1000,
-                600
-            ]
+            "typeVersion": 1,
+            "position": [1000, 600]
         },
         {
             "parameters": {
@@ -237,43 +65,31 @@
                 "sendHeaders": true,
                 "headerParameters": {
                     "parameters": [
-                        {
-                            "name": "Authorization",
-                            "value": "Bearer 0594f41c-e836-425d-aaa2-1c5b7d9e506e"
-                        },
-                        {
-                            "name": "Content-Type",
-                            "value": "application/json"
-                        }
+                        { "name": "Authorization", "value": "Bearer 0594f41c-e836-425d-aaa2-1c5b7d9e506e" },
+                        { "name": "Content-Type", "value": "application/json" }
                     ]
                 },
                 "sendBody": true,
                 "specifyBody": "json",
-                "jsonBody": "={{ JSON.stringify({ customer: { number: $json.phone }, assistantId: $json.assistant_id || 'f3359bb0-7bc4-45c7-9a02-ca4793cc5d48', phoneNumberId: 'b3b47ab7-b74b-46b9-bf72-0f82d6731f56', assistantOverrides: { variableValues: { nombre: $json.name, empresa: $json.name, ciudad: $json.address, tel_contacto: $json.phone, correo_cliente: $json.email, leadId: $json.leadId } } }) }}",
+                "jsonBody": "={{ JSON.stringify({ customer: { number: $json.phone }, assistantId: $json.assistant_id || 'f3359bb0-7bc4-45c7-9a02-ca4793cc5d48', phoneNumberId: 'ee153e9d-ece6-4469-a634-70eaa6e083c4', assistantOverrides: { variableValues: { nombre: $json.name, empresa: $json.name, ciudad: $json.address, tel_contacto: $json.phone, correo_cliente: $json.email, leadId: $json.leadId, fecha_hoy: $json.fecha_hoy, dia_semana: $json.dia_semana } } }) }}",
                 "options": {}
             },
             "id": "launch-vapi-call",
             "name": "Launch Vapi Call",
             "type": "n8n-nodes-base.httpRequest",
             "typeVersion": 4.2,
-            "position": [
-                1200,
-                600
-            ],
+            "position": [1200, 600],
             "onError": "continueRegularOutput"
         },
         {
             "parameters": {
-                "jsCode": "// Validate Vapi call response — only proceed if we got a real call ID\nconst vapiResponse = $input.first().json;\nconst callId = vapiResponse.id || '';\nconst leadData = $('One at a Time').item.json;\n\n// Check if Vapi actually created the call\nif (!callId || callId === 'unknown' || callId.length < 10) {\n  // Vapi call FAILED — mark lead as Fallido to prevent infinite retry\n  // and stop the pipeline from creating phantom log entries\n  return {\n    json: {\n      callSuccess: false,\n      vapiCallId: 'FAILED',\n      leadRowId: leadData.leadRowId,\n      leadId: leadData.leadId,\n      name: leadData.name,\n      phone: leadData.phone,\n      error: vapiResponse.message || vapiResponse.error || 'No call ID returned'\n    }\n  };\n}\n\n// Call succeeded\nreturn {\n  json: {\n    callSuccess: true,\n    vapiCallId: callId,\n    leadRowId: leadData.leadRowId,\n    leadId: leadData.leadId,\n    name: leadData.name,\n    phone: leadData.phone\n  }\n};"
+                "jsCode": "// Validate Vapi call response — only proceed if we got a real call ID\nconst vapiResponse = $input.first().json;\nconst callId = vapiResponse.id || '';\nconst leadData = $('One at a Time').item.json;\n\n// Check if Vapi actually created the call\nif (!callId || callId === 'unknown' || callId.length < 10) {\n  return {\n    json: {\n      callSuccess: false,\n      vapiCallId: 'FAILED',\n      leadRowId: leadData.leadRowId,\n      leadId: leadData.leadId,\n      name: leadData.name,\n      phone: leadData.phone,\n      error: vapiResponse.message || vapiResponse.error || 'No call ID returned'\n    }\n  };\n}\n\n// Call succeeded\nreturn {\n  json: {\n    callSuccess: true,\n    vapiCallId: callId,\n    leadRowId: leadData.leadRowId,\n    leadId: leadData.leadId,\n    name: leadData.name,\n    phone: leadData.phone\n  }\n};"
             },
             "id": "check-call-success",
             "name": "Check Call Success",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
-            "position": [
-                1400,
-                600
-            ]
+            "position": [1400, 600]
         },
         {
             "parameters": {
@@ -303,10 +119,7 @@
             "name": "Call Succeeded?",
             "type": "n8n-nodes-base.if",
             "typeVersion": 2,
-            "position": [
-                1600,
-                600
-            ]
+            "position": [1600, 600]
         },
         {
             "parameters": {
@@ -315,14 +128,8 @@
                 "sendHeaders": true,
                 "headerParameters": {
                     "parameters": [
-                        {
-                            "name": "xc-token",
-                            "value": "vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d"
-                        },
-                        {
-                            "name": "Content-Type",
-                            "value": "application/json"
-                        }
+                        { "name": "xc-token", "value": "vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d" },
+                        { "name": "Content-Type", "value": "application/json" }
                     ]
                 },
                 "sendBody": true,
@@ -334,10 +141,7 @@
             "name": "Log Call to NocoDB",
             "type": "n8n-nodes-base.httpRequest",
             "typeVersion": 4.2,
-            "position": [
-                1800,
-                500
-            ],
+            "position": [1800, 500],
             "onError": "continueRegularOutput"
         },
         {
@@ -347,29 +151,20 @@
                 "sendHeaders": true,
                 "headerParameters": {
                     "parameters": [
-                        {
-                            "name": "xc-token",
-                            "value": "vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d"
-                        },
-                        {
-                            "name": "Content-Type",
-                            "value": "application/json"
-                        }
+                        { "name": "xc-token", "value": "vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d" },
+                        { "name": "Content-Type", "value": "application/json" }
                     ]
                 },
                 "sendBody": true,
                 "specifyBody": "json",
-                "jsonBody": "={{ JSON.stringify([{ Id: $('Check Call Success').first().json.leadRowId, status: 'Llamando...' }]) }}",
+                "jsonBody": "={{ JSON.stringify([{ Id: $('Check Call Success').first().json.leadRowId, status: 'Llamando...', fecha_planificada: null }]) }}",
                 "options": {}
             },
             "id": "update-lead-success",
             "name": "Update Lead (Success)",
             "type": "n8n-nodes-base.httpRequest",
             "typeVersion": 4.2,
-            "position": [
-                2000,
-                500
-            ],
+            "position": [2000, 500],
             "onError": "continueRegularOutput"
         },
         {
@@ -379,29 +174,20 @@
                 "sendHeaders": true,
                 "headerParameters": {
                     "parameters": [
-                        {
-                            "name": "xc-token",
-                            "value": "vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d"
-                        },
-                        {
-                            "name": "Content-Type",
-                            "value": "application/json"
-                        }
+                        { "name": "xc-token", "value": "vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d" },
+                        { "name": "Content-Type", "value": "application/json" }
                     ]
                 },
                 "sendBody": true,
                 "specifyBody": "json",
-                "jsonBody": "={{ JSON.stringify([{ Id: $json.leadRowId, status: 'Fallido' }]) }}",
+                "jsonBody": "={{ JSON.stringify([{ Id: $json.leadRowId, status: 'Fallido', fecha_planificada: null }]) }}",
                 "options": {}
             },
             "id": "update-lead-failed",
             "name": "Update Lead (Failed)",
             "type": "n8n-nodes-base.httpRequest",
             "typeVersion": 4.2,
-            "position": [
-                1800,
-                750
-            ],
+            "position": [1800, 750],
             "onError": "continueRegularOutput"
         },
         {
@@ -413,189 +199,65 @@
             "name": "Wait 15s",
             "type": "n8n-nodes-base.wait",
             "typeVersion": 1.1,
-            "position": [
-                2200,
-                500
-            ]
+            "position": [2200, 500]
         }
     ],
     "connections": {
-        "Webhook Vapi": {
-            "main": [
-                [
-                    {
-                        "node": "Extract Data",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
-            ]
-        },
-        "Extract Data": {
-            "main": [
-                [
-                    {
-                        "node": "Google Calendar",
-                        "type": "main",
-                        "index": 0
-                    },
-                    {
-                        "node": "NocoDB Confirmed",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
-            ]
-        },
-        "NocoDB Confirmed": {
-            "main": [
-                [
-                    {
-                        "node": "NocoDB Update Lead",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
-            ]
-        },
-        "NocoDB Update Lead": {
-            "main": [
-                [
-                    {
-                        "node": "Respond to Vapi",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
-            ]
-        },
         "Every 1 Min": {
             "main": [
-                [
-                    {
-                        "node": "Get Programado Leads",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
+                [{ "node": "Get Programado Leads", "type": "main", "index": 0 }]
             ]
         },
         "Get Programado Leads": {
             "main": [
-                [
-                    {
-                        "node": "Filter Due Leads",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
+                [{ "node": "Filter Due Leads", "type": "main", "index": 0 }]
             ]
         },
         "Filter Due Leads": {
             "main": [
-                [
-                    {
-                        "node": "One at a Time",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
+                [{ "node": "One at a Time", "type": "main", "index": 0 }]
             ]
         },
         "One at a Time": {
             "main": [
-                [
-                    {
-                        "node": "Launch Vapi Call",
-                        "type": "main",
-                        "index": 0
-                    }
-                ],
+                [{ "node": "Launch Vapi Call", "type": "main", "index": 0 }],
                 []
             ]
         },
         "Launch Vapi Call": {
             "main": [
-                [
-                    {
-                        "node": "Check Call Success",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
+                [{ "node": "Check Call Success", "type": "main", "index": 0 }]
             ]
         },
         "Check Call Success": {
             "main": [
-                [
-                    {
-                        "node": "Call Succeeded?",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
+                [{ "node": "Call Succeeded?", "type": "main", "index": 0 }]
             ]
         },
         "Call Succeeded?": {
             "main": [
-                [
-                    {
-                        "node": "Log Call to NocoDB",
-                        "type": "main",
-                        "index": 0
-                    }
-                ],
-                [
-                    {
-                        "node": "Update Lead (Failed)",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
+                [{ "node": "Log Call to NocoDB", "type": "main", "index": 0 }],
+                [{ "node": "Update Lead (Failed)", "type": "main", "index": 0 }]
             ]
         },
         "Log Call to NocoDB": {
             "main": [
-                [
-                    {
-                        "node": "Update Lead (Success)",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
+                [{ "node": "Update Lead (Success)", "type": "main", "index": 0 }]
             ]
         },
         "Update Lead (Success)": {
             "main": [
-                [
-                    {
-                        "node": "Wait 15s",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
+                [{ "node": "Wait 15s", "type": "main", "index": 0 }]
             ]
         },
         "Wait 15s": {
             "main": [
-                [
-                    {
-                        "node": "One at a Time",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
+                [{ "node": "One at a Time", "type": "main", "index": 0 }]
             ]
         },
         "Update Lead (Failed)": {
             "main": [
-                [
-                    {
-                        "node": "Wait 15s",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
+                [{ "node": "Wait 15s", "type": "main", "index": 0 }]
             ]
         }
     },

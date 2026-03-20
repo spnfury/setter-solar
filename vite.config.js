@@ -58,6 +58,11 @@ export default defineConfig({
                 target: 'https://optima-nocodb.vhsxer.easypanel.host',
                 changeOrigin: true,
                 rewrite: (path) => path.replace(/^\/nocodb-api/, '')
+            },
+            '/n8n-webhook': {
+                target: 'https://optima-n8n.vhsxer.easypanel.host',
+                changeOrigin: true,
+                rewrite: (path) => path.replace(/^\/n8n-webhook/, '')
             }
         }
     }

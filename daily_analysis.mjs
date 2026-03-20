@@ -14,20 +14,20 @@
  *   OPENAI_API_KEY=sk-...  (required)
  * 
  * Cron (every day at 23:00 CET):
- *   0 22 * * * cd /path/to/call-dashboard-app && OPENAI_API_KEY=sk-... node daily_analysis.mjs
+ *   0 22 * * * cd /path/to/call-dashboard-app && node daily_analysis.mjs
  */
 
-const API_BASE = 'https://nocodb.srv889387.hstgr.cloud/api/v2/tables';
-const CALL_LOGS_TABLE = 'm013en5u2cyu30j';
-const CONFIRMED_TABLE = 'mtoilizta888pej';
-const LEADS_TABLE = 'mgot1kl4sglenym';
-const REPORTS_TABLE = 'matif11dcltlmn6';
-const XC_TOKEN = 'jx3uoKeVaidZLF7M0skVb9pV6yvNsam0Hu-Vfeww';
+const API_BASE = 'https://optima-nocodb.vhsxer.easypanel.host/api/v2/tables';
+const CALL_LOGS_TABLE = 'm73w58ba47ifkrx';
+const CONFIRMED_TABLE = 'mh4cvunsnskuu4b';
+const LEADS_TABLE = 'mf0wzufqcpi3bd1';
+const REPORTS_TABLE = 'matif11dcltlmn6'; // Asumiendo que esta es igual o debes validarla; si no hay tabla nueva de informes, déjala como matif11dcltlmn6 o coméntalo.
+const XC_TOKEN = 'vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d';
 
-const VAPI_API_KEY = '852080ba-ce7c-4778-b218-bf718613a2b6';
+const VAPI_API_KEY = '0594f41c-e836-425d-aaa2-1c5b7d9e506e';
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const OPENAI_MODEL = 'gpt-4o-mini';
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+const GROQ_MODEL = 'llama-3.3-70b-versatile';
 
 // Parse args
 const args = process.argv.slice(2);
@@ -201,8 +201,8 @@ function calculateMetrics(calls, confirmedMap) {
 // ═══════════════════════════════════════════════════════════
 
 async function generateAIAnalysis(metrics, date) {
-    if (!OPENAI_API_KEY) {
-        console.warn('⚠️  No OPENAI_API_KEY set. Generating basic analysis without AI.');
+    if (!GROQ_API_KEY) {
+        console.warn('⚠️  No GROQ_API_KEY set. Generating basic analysis without AI.');
         return {
             analysis: generateBasicAnalysis(metrics, date),
             recommendations: generateBasicRecommendations(metrics),
@@ -210,7 +210,7 @@ async function generateAIAnalysis(metrics, date) {
         };
     }
 
-    const prompt = `Eres un analista experto en campañas de llamadas telefónicas automatizadas con IA para una empresa de ciberseguridad (General Protec). 
+    const prompt = `Eres un analista experto en campañas de llamadas telefónicas automatizadas con IA para una empresa de energía solar (Setter Solar). 
 Analiza los resultados del día ${date} y proporciona un informe profesional en español.
 
 ## DATOS DEL DÍA ${date}
@@ -224,7 +224,7 @@ Analiza los resultados del día ${date} y proporciona un informe profesional en 
 - Sin datos/pendientes: ${metrics.sinDatos + metrics.pendiente}
 - Duración media: ${metrics.avgDuration}s
 - Coste total: $${metrics.totalCost}
-- Empresas contactadas: ${metrics.companiesContacted}
+- Empresas/Leads contactados: ${metrics.companiesContacted}
 - Datos confirmados: ${metrics.confirmedCount} (${metrics.confirmationRate}%)
 
 ### Distribución horaria:
@@ -240,7 +240,7 @@ ${metrics.summaries.map((s, i) => `${i + 1}. ${s.empresa} | ${s.evaluacion} | ${
 Responde EXACTAMENTE en este formato JSON (sin markdown, solo JSON puro):
 {
   "analysis": "Párrafo de análisis general del día (200-400 palabras). Incluye contexto, qué fue bien y qué fue mal.",
-  "patterns": "Patrones detectados: mejores horarios, sectores más receptivos, problemas recurrentes.",
+  "patterns": "Patrones detectados: mejores horarios, receptividad, problemas recurrentes.",
   "recommendations": "3-5 recomendaciones concretas y accionables para mejorar los resultados.",
   "highlights": "2-3 puntos destacados positivos del día.",
   "concerns": "2-3 problemas o áreas de preocupación.",
@@ -248,16 +248,16 @@ Responde EXACTAMENTE en este formato JSON (sin markdown, solo JSON puro):
 }`;
 
     try {
-        const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
             headers: {
-                'Authorization': `Bearer ${OPENAI_API_KEY}`,
+                'Authorization': `Bearer ${GROQ_API_KEY}`,
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                model: OPENAI_MODEL,
+                model: GROQ_MODEL,
                 messages: [
-                    { role: 'system', content: 'Eres un analista de datos especializado en campañas de llamadas. Responde siempre en JSON válido.' },
+                    { role: 'system', content: 'Eres un analista de datos especializado en campañas de llamadas. Responde siempre en JSON válido, sin bloques de código markdown ni backticks.' },
                     { role: 'user', content: prompt }
                 ],
                 temperature: 0.7,
@@ -267,23 +267,33 @@ Responde EXACTAMENTE en este formato JSON (sin markdown, solo JSON puro):
 
         if (!res.ok) {
             const err = await res.json().catch(() => ({}));
-            throw new Error(`OpenAI API error ${res.status}: ${err.error?.message || 'Unknown'}`);
+            throw new Error(`Groq API error ${res.status}: ${err.error?.message || 'Unknown'}`);
         }
 
         const data = await res.json();
         const content = data.choices[0]?.message?.content || '';
 
         // Parse JSON from response (handle possible markdown wrapping)
-        const jsonStr = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-        const parsed = JSON.parse(jsonStr);
+        let jsonStr = content.trim();
+        if (jsonStr.startsWith('\`\`\`')) {
+            jsonStr = jsonStr.replace(/^\`\`\`(?:json)?\n?/, '').replace(/\n?\`\`\`$/, '');
+        }
+        
+        let parsed;
+        try {
+            parsed = JSON.parse(jsonStr);
+        } catch (e) {
+            console.warn('⚠️  Groq returned invalid JSON, attempting fallback parsing.', jsonStr.substring(0, 100));
+            parsed = { analysis: jsonStr.substring(0, 500) + '...', patterns: '', recommendations: 'Revisar output manualmente', highlights: '', concerns: '', score: 50 };
+        }
 
         return {
-            analysis: `${parsed.analysis}\n\n**Patrones detectados:**\n${parsed.patterns}\n\n**Puntos destacados:**\n${parsed.highlights}\n\n**Áreas de preocupación:**\n${parsed.concerns}`,
-            recommendations: parsed.recommendations,
+            analysis: `${parsed.analysis || ''}\n\n**Patrones detectados:**\n${parsed.patterns || ''}\n\n**Puntos destacados:**\n${parsed.highlights || ''}\n\n**Áreas de preocupación:**\n${parsed.concerns || ''}`,
+            recommendations: parsed.recommendations || 'Sin recomendaciones.',
             score: parsed.score || 50
         };
     } catch (err) {
-        console.error('❌ OpenAI error:', err.message);
+        console.error('❌ Groq error:', err.message);
         return {
             analysis: generateBasicAnalysis(metrics, date),
             recommendations: generateBasicRecommendations(metrics),
@@ -384,7 +394,7 @@ async function main() {
     console.log('═'.repeat(60));
     console.log(`📊 ANÁLISIS DIARIO DE LLAMADAS — ${TARGET_DATE}`);
     console.log('═'.repeat(60));
-    if (!OPENAI_API_KEY) console.log('⚠️  OPENAI_API_KEY no configurada — se usará análisis básico');
+    if (!GROQ_API_KEY) console.log('⚠️  GROQ_API_KEY no configurada — se usará análisis básico');
     if (DRY_RUN) console.log('⚠️  MODO DRY RUN — No se guardará en NocoDB');
     console.log('');
 

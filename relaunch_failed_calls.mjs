@@ -17,21 +17,32 @@ const XC_TOKEN = 'vodwktZQ77mth3XeK290Fw8V9Axloe1LiOxsWn5d';
 async function main() {
     console.log('🔄 Buscando llamadas fallidas (SIP 503) para relanzar...\n');
     
-    // 1. Fetch Failed Calls
+    // 1. Fetch Failed Calls — ONLY "Fallida" (SIP 503 trunk errors), NOT "No disponible" (SIP 480 phone unreachable)
     const url = `${NOCODB_BASE}/${CALL_LOGS_TABLE}/records?limit=1000&where=(evaluation,eq,Fallida)&sort=-CreatedAt`;
     const res = await fetch(url, { headers: { 'xc-token': XC_TOKEN } });
     const data = await res.json();
     const failedCalls = data.list || [];
     
-    console.log(`📊 Encontradas ${failedCalls.length} llamadas fallidas (SIP 503).`);
+    // Extra safety: filter out any "No disponible" that might have been marked as Fallida in older data
+    const retryableCalls = failedCalls.filter(c => {
+        const reason = (c.ended_reason || '').toLowerCase();
+        // Skip SIP 480 / phone unreachable — not a system error, phone was just off
+        if (reason.includes('no disponible') || reason.includes('apagado') || reason.includes('480')) {
+            return false;
+        }
+        return true;
+    });
     
-    if (failedCalls.length === 0) {
-        console.log('✅ No hay llamadas que relanzar.');
+    console.log(`📊 Encontradas ${failedCalls.length} llamadas fallidas total.`);
+    console.log(`   └─ ${retryableCalls.length} retryable (SIP 503), ${failedCalls.length - retryableCalls.length} skipped (phone unreachable).`);
+    
+    if (retryableCalls.length === 0) {
+        console.log('✅ No hay llamadas retryable que relanzar.');
         return;
     }
 
     // Extract unique phones
-    const phonesToRetry = [...new Set(failedCalls.map(c => c.phone_called).filter(p => p))];
+    const phonesToRetry = [...new Set(retryableCalls.map(c => c.phone_called).filter(p => p))];
     console.log(`📞 Teléfonos únicos a relanzar: ${phonesToRetry.length}\n`);
 
     // 2. We need the unique_ids from the leads table to modify them

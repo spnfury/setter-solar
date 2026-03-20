@@ -15,7 +15,7 @@ const VAPI_API_KEY = '0594f41c-e836-425d-aaa2-1c5b7d9e506e';
 
 const CONFIG = {
     MAX_DAILY_CALLS: 200,      // Kill-switch: maximum calls per day allowed
-    MAX_CONCURRENCY: 10,       // Max simultaneous calls on Vapi trunk
+    MAX_CONCURRENCY: 3,        // ⚠️ SIP trunk allows ~10, use 3 for safety
     BUSINESS_HOURS: {
         START: 9,              // 09:00
         END: 20                // 20:59 is the last allowed minute before 21:00

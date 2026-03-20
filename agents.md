@@ -1,8 +1,8 @@
 # Persistent Agent Configuration
 
 ## n8n Integration
-- **API URL**: `https://n8n.srv889387.hstgr.cloud/api/v1`
-- **API Key**: `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlMDIyMDljMS1mMWEzLTRhN2ItYjQ3MC0wYWM3MmJiMzljZWYiLCJpc3MiOiJuOG4iLCJhdWQiOiJwdWJsaWMtYXBpIiwiaWF0IjoxNzcxMjM3ODEwLCJleHAiOjE3NzM3ODg0MDB9.ZNAmgm1OPjq8WRA0gPgdmU3CjsNYoyE2Z-arrWfA0LU`
+- **API URL**: `https://optima-n8n.vhsxer.easypanel.host/api/v1`
+- **API Key**: `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI4YjU0YmU1Mi03Njg3LTQwNGYtYWVjYy03MzM4MmQxZDhiMjUiLCJpc3MiOiJuOG4iLCJhdWQiOiJwdWJsaWMtYXBpIiwiaWF0IjoxNzczNzcyMzY4fQ.nPl-aaEo8SLZ3t4HODOiGP1D7FsWzu-rz9hrUZFOWtA`
 
 ## Project Status
 - **Master Workflow**: `n8n_master_workflow.json` consolidated and uploaded.
