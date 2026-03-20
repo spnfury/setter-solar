@@ -53,7 +53,12 @@ function sleep(ms)    { return new Promise(r => setTimeout(r, ms)); }
 function ts()         { return new Date().toLocaleTimeString('es-ES', { timeZone: 'Europe/Madrid', hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
 function normalizePhone(p) {
     p = String(p || '').replace(/\D/g, '');
-    return p ? (p.startsWith('34') ? '+' + p : '+34' + p) : '';
+    if (!p) return '';
+    if (p.length === 9 && /^[6789]/.test(p)) p = '34' + p;
+    if (p.startsWith('34') && p.length === 11 && /^[6789]/.test(p.substring(2))) {
+        return '+' + p;
+    }
+    return 'INVALID';
 }
 
 // ── 1. DATA FETCH ─────────────────────────────────────────────
@@ -65,13 +70,29 @@ async function fetchLeads(limit) {
         headers: { 'xc-token': XC_TOKEN }
     });
     const data = await res.json();
-    const leads = (data.list || []).filter(l => {
+    const leadsObj = data.list || [];
+    const validLeads = [];
+    
+    for (const l of leadsObj) {
+        if ((l.name || '').toLowerCase().includes('sergi')) continue;
         const phone = normalizePhone(l.phone);
-        if (!phone) return false;
-        if ((l.name || '').toLowerCase().includes('sergi')) return false;
-        return true;
-    });
-    return leads.slice(0, limit);
+        
+        if (phone === 'INVALID' || !phone) {
+            if (phone === 'INVALID' && !DRY_RUN) {
+                console.log(`   🚫 Descartando número malformado: ${l.phone} (${l.name})`);
+                await fetch(`${API_BASE}/${LEADS_TABLE}/records`, {
+                    method: 'PATCH',
+                    headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+                    body: JSON.stringify([{ unique_id: l.unique_id, status: 'Invalido - Formato', fecha_planificada: null }])
+                }).catch(() => {});
+            }
+            continue;
+        }
+        l.normalizedPhone = phone;
+        validLeads.push(l);
+        if (validLeads.length >= limit) break;
+    }
+    return validLeads;
 }
 
 async function getActiveCallCount() {
@@ -101,7 +122,7 @@ async function waitForSlot(phone) {
 // ── 2. CALL LAUNCHER ─────────────────────────────────────────
 
 async function callLead(lead) {
-    const phone = normalizePhone(lead.phone);
+    const phone = lead.normalizedPhone || normalizePhone(lead.phone);
     const name  = lead.name || 'Cliente';
 
     if (DRY_RUN) {
@@ -157,10 +178,10 @@ async function callLead(lead) {
             body: JSON.stringify([{ unique_id: lead.unique_id, status: 'Llamando...', fecha_planificada: null }])
         }).catch(() => {});
 
-        return { success: true, phone, name, vapiId: vapiData.id };
+        return { success: true, phone, name, unique_id: lead.unique_id, vapiId: vapiData.id };
     } catch (err) {
         console.log(`❌ ${err.message}`);
-        return { success: false, phone, name, error: err.message };
+        return { success: false, phone, name, unique_id: lead.unique_id, error: err.message };
     }
 }
 
@@ -404,6 +425,27 @@ async function main() {
     let callData = [];
     if (!SKIP_ANALYSIS && vapiIds.length > 0) {
         callData = await waitForBatchToFinish(vapiIds);
+
+        // Post-batch cleanup for SIP errors
+        if (!DRY_RUN) {
+            const vapiIdToLead = {};
+            launched.forEach(r => { vapiIdToLead[r.vapiId] = r.unique_id; });
+            
+            for (const c of callData) {
+                const reason = (c.endedReason || '').toLowerCase();
+                if (reason.includes('sip') || reason.includes('failed-to-connect') || reason.includes('providerfault')) {
+                    const unique_id = vapiIdToLead[c.id];
+                    if (unique_id) {
+                        await fetch(`${API_BASE}/${LEADS_TABLE}/records`, {
+                            method: 'PATCH',
+                            headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+                            body: JSON.stringify([{ unique_id, status: 'Error SIP', fecha_planificada: null }])
+                        }).catch(() => {});
+                        console.log(`   🚫 Lead actualizado a 'Error SIP' permanentemente: ${c.customer?.number}`);
+                    }
+                }
+            }
+        }
     }
 
     // Analysis
