@@ -102,7 +102,7 @@ function fetchVapiCall(vapiCallId, { skipCache = false } = {}) {
         });
 
         if (!res.ok) {
-            throw new Error(`Vapi HTTP ${res.status}`);
+            throw { status: res.status, message: `Vapi HTTP ${res.status}` };
         }
 
         const data = await res.json();
@@ -110,8 +110,8 @@ function fetchVapiCall(vapiCallId, { skipCache = false } = {}) {
         return data;
     }).catch(err => {
         // Don't break the queue on errors
-        console.warn(`[VapiCache] Error fetching ${vapiCallId}:`, err.message);
-        return null;
+        console.warn(`[VapiCache] Error fetching ${vapiCallId}:`, err.message || err);
+        return { _error: err.status || 500, message: err.message };
     });
 
     return _vapiRequestQueue;
@@ -1263,9 +1263,28 @@ async function enrichCallsFromVapi(calls) {
     for (const call of callsToEnrich) {
         try {
             const vapiData = await fetchVapiCall(call.vapi_call_id, { skipCache: true });
-            if (!vapiData) {
-                logApiError({ url: `${VAPI_API_BASE}/call/${call.vapi_call_id}`, method: 'GET', status: 'error', statusText: 'null response', context: 'enrichCallsFromVapi', detail: `callId=${call.vapi_call_id}` });
-                break; // Stop immediately to avoid spamming the rate-limited API
+            if (!vapiData || vapiData._error) {
+                const errStatus = vapiData ? vapiData._error : 500;
+                logApiError({ url: `${VAPI_API_BASE}/call/${call.vapi_call_id}`, method: 'GET', status: errStatus, statusText: 'vapi error', context: 'enrichCallsFromVapi', detail: `callId=${call.vapi_call_id}` });
+                
+                if (errStatus === 429) {
+                    console.warn(`[Enrich] Rate limit hit (429) for ${call.vapi_call_id}. Aborting batch.`);
+                    break; // Stop immediately to avoid spamming the rate-limited API
+                } else if (errStatus === 404 || errStatus === 400 || errStatus === 500) {
+                    console.warn(`[Enrich] Call not found or fatal error (${errStatus}) for ${call.vapi_call_id}. Marking as error.`);
+                    // Mark as error in NocoDB to avoid infinite retry loops!
+                    call.evaluation = 'Error';
+                    call.ended_reason = 'Error Vapi ' + errStatus;
+                    call.call_disposition = 'Error Técnico';
+                    await fetch(`${API_BASE}/${CALL_LOGS_TABLE}/records`, {
+                        method: 'PATCH',
+                        headers: { 'xc-token': XC_TOKEN, 'Content-Type': 'application/json' },
+                        body: JSON.stringify([{ Id: call.id || call.Id, evaluation: 'Error', ended_reason: 'Error Vapi ' + errStatus, call_disposition: 'Error Técnico' }])
+                    });
+                    updated = true;
+                    continue; 
+                }
+                break; // Break on generic unknown errors to be safe
             }
 
             // If call has a failed status, mark as Error
