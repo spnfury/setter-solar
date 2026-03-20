@@ -62,7 +62,7 @@ let activeDetailCall = null; // Global state for the currently active call in th
 // Prevents 429 (Too Many Requests) errors by caching responses and serializing requests
 const _vapiCache = new Map(); // Map<vapiCallId, { data, timestamp }>
 const VAPI_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const VAPI_REQUEST_INTERVAL_MS = 1500; // Minimum 1.5s between Vapi API requests
+const VAPI_REQUEST_INTERVAL_MS = 3000; // Minimum 3s between Vapi API requests
 let _vapiLastRequestTime = 0;
 let _vapiRequestQueue = Promise.resolve(); // Serialize all Vapi requests
 
@@ -1265,7 +1265,7 @@ async function enrichCallsFromVapi(calls) {
             const vapiData = await fetchVapiCall(call.vapi_call_id, { skipCache: true });
             if (!vapiData) {
                 logApiError({ url: `${VAPI_API_BASE}/call/${call.vapi_call_id}`, method: 'GET', status: 'error', statusText: 'null response', context: 'enrichCallsFromVapi', detail: `callId=${call.vapi_call_id}` });
-                continue;
+                break; // Stop immediately to avoid spamming the rate-limited API
             }
 
             // If call has a failed status, mark as Error
@@ -5429,14 +5429,14 @@ function startRealtimeBgPolling() {
     if (realtimeBgInterval) return;
     // Do an initial scan
     fetchRealtimeCalls(true);
-    // Then every 10 seconds
+    // Then every 30 seconds (reduced from 10s to ease rate limits)
     realtimeBgInterval = setInterval(() => {
         // Only update badge if NOT on the realtime tab (if on realtime, the main polling handles it)
         const isOnRealtimeTab = document.getElementById('view-realtime')?.classList.contains('active');
         if (!isOnRealtimeTab) {
             fetchRealtimeCalls(true); // lightweight, badge-only
         }
-    }, 10000);
+    }, 30000);
 }
 
 function startRealtimePolling() {
