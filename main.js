@@ -3691,8 +3691,8 @@ async function loadData(skipEnrichment = false) {
 
         // Enrich calls with missing data from Vapi (runs in background after render)
         if (!isEnriching && !skipEnrichment) {
+            isEnriching = true;
             setTimeout(async () => {
-                isEnriching = true;
                 try {
                     const wasUpdated = await enrichCallsFromVapi(calls);
                     if (wasUpdated) {
